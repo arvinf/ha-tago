@@ -1,0 +1,32 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "Enter network key",
+                "data": {"network_key": "Network key"},
+                "data_description": {
+                    "network_key": "The key is programmed into each device at installation time."
+                }
+            }
+        },
+        "error": {
+            "cannot_connect": "Failed to connect",
+            "invalid_auth": "Invalid authentication",
+            "bad_network_key": "Network key is incorrect",
+            "unknown": "Unexpected error"
+        },
+        "abort": {
+            "not_tago_device": "{host} is not a TAGO device",
+            "already_configured": "Device is already configured"
+        }
+    },
+    "options": {
+        "error": {
+            "cannot_connect": "Failed to connect",
+            "invalid_auth": "Invalid authentication",
+            "bad_network_key": "Network key is incorrect",
+            "unknown": "Unexpected error"
+        }
+    }
+  }
+  
