@@ -4,7 +4,7 @@
     "version": "1.0.0",
     "config_flow": true,
     "documentation": "https://www.home-assistant.io/integrations/tago",
-    "requirements": ["websockets==11.0.3", "PyCryptodome==3.19.0"],
+    "requirements": ["websockets>=11.0.3", "PyCryptodome==3.19.0"],
     "zeroconf": ["_tagonet._tcp.local."],
     "homekit": {},
     "codeowners": ["@arvinf"],
