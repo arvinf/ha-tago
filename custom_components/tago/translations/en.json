@@ -1,32 +1,43 @@
 {
-    "config": {
-        "step": {
-            "user": {
-                "title": "Enter network key",
-                "data": {"network_key": "Network key"},
-                "data_description": {
-                    "network_key": "The key is programmed into each device at installation time."
-                }
-            }
+  "title": "Tago Lighting",
+  "config": {
+    "flow_title": "{device_name}",
+    "step": {
+      "user": {
+        "title": "Add New Tago Device",
+        "data": {
+          "hostname": "Host",
+          "authkey": "Authentication Key"
         },
-        "error": {
-            "cannot_connect": "Failed to connect",
-            "invalid_auth": "Invalid authentication",
-            "bad_network_key": "Network key is incorrect",
-            "unknown": "Unexpected error"
-        },
-        "abort": {
-            "not_tago_device": "{host} is not a TAGO device",
-            "already_configured": "Device is already configured"
+        "data_description": {
+          "hostname": "The hostname or IP address of the Tago Device.",
+          "authkey": "You can find this on the device dashboard."
         }
+      },
+      "zeroconf_confirm": {
+        "title": "Add Device",
+        "data": {
+          "authkey": "Authentication Key"
+        },
+        "data_description": {
+          "authkey": "You can find this on the device dashboard."
+        },
+        "description": "Do you want to add Tago Device `{device_name}` to Home Assistant?"
+      }
     },
-    "options": {
-        "error": {
-            "cannot_connect": "Failed to connect",
-            "invalid_auth": "Invalid authentication",
-            "bad_network_key": "Network key is incorrect",
-            "unknown": "Unexpected error"
-        }
+    "error": {
+      "already_in_progress": "This device is already in the process of being added.",
+      "already_configured": "This device has already been configured.",
+      "cannot_connect": "Cannot connect to device.",
+      "invalid_auth": "Authentication failed.",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_in_progress": "This device is already in the process of being added.",
+      "already_configured": "This device has already been configured.",
+      "cannot_connect": "Cannot connect to device.",
+      "invalid_auth": "Authentication failed.",
+      "unknown": "Unexpected error"
     }
   }
-  
+}
