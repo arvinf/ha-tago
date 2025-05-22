@@ -93,6 +93,8 @@ class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
 
             ## add device to the list if the network id matches
             if nwid == network_id and not info.server in hosts:
+                if info.server.endswith('.'):
+                    info.server = info.server[:-1]
                 hosts.append(info.server)
 
     async def async_step_user(

@@ -334,9 +334,9 @@ class TagoDevice(TagoEntity):
     async def _device_task(self) -> None:
         uri = f"ws://{self._host}/api/v1/ws"
         self._running = True
-        while self._running:
-            _LOGGER.info(f"connecting to {self._host}")
+        while self._running:            
             try:
+                _LOGGER.info(f"connecting to {self._host}")
                 async with websockets.connect(
                     uri=uri, ping_timeout=5, ping_interval=5
                 ) as websocket:
@@ -349,7 +349,6 @@ class TagoDevice(TagoEntity):
                         await self.handle_ws_msgs()
                     except Exception as e:
                         self._websocket = None
-                        _LOGGER.info("==== EXCEPT")
                         _LOGGER.exception(e)
             except Exception as e:
                 self._websocket = None
