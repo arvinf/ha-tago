@@ -1,81 +1,59 @@
-"""Platform for light integration."""
-from __future__ import annotations
-
-from homeassistant.components.button import ButtonDeviceClass, ButtonEntity
+from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.entity import DeviceInfo
 
 from .const import DOMAIN
 
-import logging
-
-_LOGGER = logging.getLogger(__name__)
-
 from .TagoNet import TagoDevice
-from .models import TagoPeripheralHA
+from . import generate_device_info
 
+def generate_device_info(device: TagoDevice) -> DeviceInfo:
+    return DeviceInfo(
+        identifiers={(DOMAIN, device.unique_id)},
+        name=device.name,
+        manufacturer=device.manufacturer,
+        model=device.model_num,
+        configuration_url=device.dashboard_uri,
+    )
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    config_entry: ConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    tagonet = hass.data[DOMAIN][entry.entry_id]
-
-    async_add_entities(
-        [TagoDeviceIdentifyButton(device) for device in tagonet.devices]
-    )
-
-    async_add_entities(
-        [TagoDeviceRebootButton(device) for device in tagonet.devices]
-    )
+    device = config_entry.runtime_data
+    async_add_entities([
+        RebootButton(device, hass),
+        IdentifyButton(device, hass)
+    ])
 
 
-class TagoDeviceIdentifyButton(ButtonEntity):
-    _attr_translation_key = "identify"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_device_class = ButtonDeviceClass.IDENTIFY
+class RebootButton(ButtonEntity):
+    """A button to reboot the device."""
 
-    def __init__(
-        self,
-        device: TagoDevice,
-    ) -> None:
+    def __init__(self, device: TagoDevice, hass: HomeAssistant):
         self._device = device
-        self._attr_unique_id = f"{self._device.uid}_identify"
+        self._hass = hass
+        self._attr_unique_id = f"{device.unique_id}:reboot"
+        self._attr_name = "Reboot Device"
+        self._attr_device_info = generate_device_info(device)
 
-    async def async_press(self) -> None:
-        await self._device.identify()
-
-    @property
-    def icon(self) -> str:
-        return "mdi:led-on"
-
-    @property
-    def name(self) -> str:
-        return f"Identify {self._device._name}"
-
-
-class TagoDeviceRebootButton(ButtonEntity):
-    _attr_translation_key = "reboot"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_device_class = ButtonDeviceClass.RESTART
-
-    def __init__(
-        self,
-        device: TagoDevice,
-    ) -> None:
-        self._device = device
-        self._attr_unique_id = f"{self._device.uid}_reboot"
-
-    async def async_press(self) -> None:
+    async def async_press(self):
         await self._device.reboot()
 
-    @property
-    def icon(self) -> str:
-        return "mdi:restart"
 
-    @property
-    def name(self) -> str:
-        return f"Restart {self._device._name}"
+class IdentifyButton(ButtonEntity):
+    """A button to identify the device."""
+
+    def __init__(self, device: TagoDevice, hass: HomeAssistant):
+        self._device = device
+        self._hass = hass
+        self._attr_unique_id = f"{device.unique_id}:identify"
+        self._attr_name = "Identify Device"
+        self._attr_device_info = generate_device_info(device)
+
+    async def async_press(self):
+        await self._device.identify()
+        

@@ -1,136 +1,144 @@
 """Config flow for Tago integration."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
-
+from urllib.parse import urlparse
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.core import HomeAssistant
-from homeassistant.data_entry_flow import FlowResult
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.components import zeroconf
+from homeassistant.data_entry_flow import FlowResult
 
-from zeroconf import IPVersion, ServiceStateChange, Zeroconf
-from zeroconf.asyncio import (
-    AsyncServiceBrowser,
-    AsyncServiceInfo,
-    AsyncZeroconf,
-    AsyncZeroconfServiceTypes,
-)
-
-from .TagoNet import TagoNet
-import asyncio
+from .TagoNet import TagoDevice
 
 from .const import (
+    CONF_AUTHKEY,
+    CONF_DEVICENAME,
+    CONF_HOSTSTR,
     DOMAIN,
-    CONF_NET_KEY,
-    CONF_NET_KEY_DEFAULT,
-    CONF_HOSTS,
-    CONF_NET_ID,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-DATA_SCHEMA = vol.Schema(
-    {vol.Required(CONF_NET_KEY, default=CONF_NET_KEY_DEFAULT): str}
-)
-
 
 class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
-    VERSION = 1
+    VERSION = 8
 
     def __init__(self):
         self.data = {}
-
-    async def zeroconf_discover_hosts(self, network_id: str, wait: int) -> None:
-        hosts = list()
-        network_id = network_id.replace(":", "").encode()
-
-        def async_on_service_state_change(
-            zeroconf: Zeroconf,
-            service_type: str,
-            name: str,
-            state_change: ServiceStateChange,
-        ) -> None:
-            if state_change is not ServiceStateChange.Added:
-                return
-            self.hass.async_create_task(
-                self.async_display_service_info(
-                    zeroconf, service_type, name, hosts, network_id
-                )
-            )
-
-        ## discover other servers over zeroconf
-        aiozc = await zeroconf.async_get_async_instance(self.hass)
-        services = ["_tagonet._tcp.local."]
-
-        aiobrowser = AsyncServiceBrowser(
-            aiozc.zeroconf, services, handlers=[async_on_service_state_change]
-        )
-        ## after 10 seconds, stop scanning
-        await asyncio.sleep(wait)
-        await aiobrowser.async_cancel()
-
-        return hosts
-
-    async def async_display_service_info(
-        self,
-        zeroconf: Zeroconf,
-        service_type: str,
-        name: str,
-        hosts: list,
-        network_id: str,
-    ) -> None:
-        info = AsyncServiceInfo(service_type, name)
-        await info.async_request(zeroconf, 3000)
-        if info:
-            nwid = info.properties.get(b"nwid", None)
-            _LOGGER.info(
-                f"Found {name} {info.server} network: {nwid} {network_id}"
-            )
-
-            ## add device to the list if the network id matches
-            if nwid == network_id and not info.server in hosts:
-                if info.server.endswith('.'):
-                    info.server = info.server[:-1]
-                hosts.append(info.server)
+        self.link_task: asyncio.Task | None = None
+        self.errors = {}
+        self.device_name = None  # Ensure device_name is initialized
+        self.hoststr = None  # Store URI for connection testing
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle a flow initialized by the user."""
-        errors = {}
-
-        self._async_abort_entries_match(
-            {CONF_NET_KEY: self.data.get(CONF_NET_KEY)}
-        )
-
         if user_input is not None:
-            self.data[CONF_NET_KEY] = user_input[CONF_NET_KEY]
+            self.authkey = user_input[CONF_AUTHKEY].strip()
+            self.hoststr  = user_input[CONF_HOSTSTR].strip()
 
-            netwk_id = ""
-            try:
-                ## validate network key
-                netwk_id = TagoNet.generate_network_id(
-                    self.data.get(CONF_NET_KEY, "").strip()
-                )
-
-                await self.async_set_unique_id(user_input[CONF_NET_KEY])
-                self._abort_if_unique_id_configured(
-                    {CONF_NET_KEY: user_input[CONF_NET_KEY]}
-                )
-
-                hosts = list()
-                hosts.extend(await self.zeroconf_discover_hosts(netwk_id, 5))
-                self.data[CONF_HOSTS] = hosts
-                return self.async_create_entry(
-                    title=f"Network {netwk_id}", data=self.data
-                )
-            except Exception:
-                errors["base"] = "bad_network_key"
+            return await self.async_step_test_connection()
 
         return self.async_show_form(
-            step_id="user", data_schema=DATA_SCHEMA, errors=errors
+            step_id="user",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_HOSTSTR): str,
+                    vol.Optional(CONF_AUTHKEY): str,
+                }
+            ),
+            errors=self.errors,
+        )
+
+    async def async_step_zeroconf(
+        self, discovery_info: zeroconf.ZeroconfServiceInfo
+    ) -> FlowResult:
+        if discovery_info:
+            self.hoststr = f"{discovery_info.hostname.removesuffix('.').strip()}:{discovery_info.port}"
+            self.device_name = discovery_info.properties.get(
+                'serialnum', 'UNKNOWN')
+
+            await self.async_set_unique_id(self.device_name)
+            self._abort_if_unique_id_configured()
+
+            self.context.update(
+                {
+                    "title_placeholders": {
+                        "device_name": f'Device {self.device_name}'
+                    }
+                }
+            )
+
+        return await self.async_step_zeroconf_confirm()
+
+    async def async_step_zeroconf_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Confirm zeroconf configuration."""
+        if user_input is not None:
+            self.authkey = user_input.get(CONF_AUTHKEY, '').strip()
+            return await self.async_step_test_connection()
+
+        self._set_confirm_only()
+        return self.async_show_form(
+            step_id="zeroconf_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(CONF_AUTHKEY): str,
+                }
+            ),
+            description_placeholders={
+                CONF_DEVICENAME: self.device_name
+            },
+            errors=self.errors,
+        )
+
+    async def async_step_test_connection(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Test the connection to the device."""
+        self.errors = {}  # Reset errors
+
+        try:
+            device = TagoDevice(self.hoststr, self.authkey)
+            await device.connect(timeout=5.0)
+            await device.disconnect(timeout=3.0)
+            device_id = device.unique_id
+            # Proceed to the final step
+
+        except (ConnectionError, asyncio.TimeoutError) as e:
+            _LOGGER.debug(f"Connection failed: {str(e)}")
+            self.errors["base"] = "cannot_connect"
+
+            # Return to the previous step with an error
+            if "zeroconf" in self.context.get("source", ""):
+                return await self.async_step_zeroconf_confirm()
+            return await self.async_step_user()
+
+        except PermissionError as e:
+            logging.exception(e)
+            _LOGGER.debug(f"Authentication failed: {str(e)}")
+            self.errors["base"] = "invalid_auth"
+
+            # Return to the previous step with an error
+            if "zeroconf" in self.context.get("source", ""):
+                return await self.async_step_zeroconf_confirm()
+            return await self.async_step_user()
+
+        """Finalize the configuration after a successful connection."""
+        await self.async_set_unique_id(device.serial_num)
+        self._abort_if_unique_id_configured()
+
+        _LOGGER.debug(
+            f"Successfully connected to Tago device {device.serial_num}"
+        )
+        return self.async_create_entry(
+            title=f'{device.model_num} {device.serial_num}',
+            data={
+                CONF_AUTHKEY: self.authkey,
+                CONF_DEVICENAME: device_id,
+                CONF_HOSTSTR: self.hoststr},
         )
