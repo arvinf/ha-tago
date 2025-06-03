@@ -61,11 +61,11 @@ class TagoCoverHA(TagoEntityHA, CoverEntity):
         await self._entity.stop_move()
 
 async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
-    lights: list[TagoCoverHA] = list()
+    items: list[TagoCoverHA] = list()
     device : TagoDevice = entry.runtime_data
     for e in device.entities:
         if type(e) == TagoCover:
-            lights.append(TagoCoverHA(e))
+            items.append(TagoCoverHA(e))
 
-    async_add_entities(lights)
+    async_add_entities(items)
 

@@ -121,6 +121,9 @@ class TagoBase:
     EVT_STATE_CHANGED = "state_changed"
     REQ_GET_CONFIG = "get_config"
     EVT_CONFIG_CHANGED = "config_changed"
+        
+    STATE_ON = "ON"
+    STATE_OFF = "OFF"
 
     def __init__(self, eid: str):
         self._eid: str = eid
@@ -143,6 +146,7 @@ class TagoEntity(TagoBase):
     EVT_KEYRELEASE = "key_released"
     VALUE_UNUSED = 'UNUSED'
     MAX_VALUE = 1000
+
 
     types = []
 
@@ -379,7 +383,7 @@ class TagoDevice(TagoBase):
                     flag.set()
 
         payload = msg.get_message()
-        # _LOGGER.warning(f"=== send_request {payload}")
+        _LOGGER.debug(f"=== outgoing {payload}")
         await self._ws.send(payload)
         if responseTimeout:
             async with asyncio.timeout(responseTimeout):
@@ -470,30 +474,34 @@ class TagoDevice(TagoBase):
                         autherror.set()
                         self._running = False
                         raise PermissionError('Auth failed')
-
+                                        
                     # refresh entities list and types
                     await self.send_request(req=TagoDevice.REQ_LIST_NODES)
                     async for message in ws:
-                        msg = TagoMessage.from_payload(message)
-                        if msg.is_response([TagoDevice.REQ_LIST_NODES]):
-                            for key, value in msg.data.get(TagoDevice.PROP_NODES, dict()).items():
+                        _LOGGER.debug(f"=== incoming {message}")
+                        msg = TagoMessage.from_payload(message)                        
+                        if msg.is_response([TagoDevice.REQ_LIST_NODES]):                            
+                            for key, value in msg.data.get(TagoDevice.PROP_NODES, dict()).items():                                
                                 for item in value.get(TagoDevice.PROP_LOADS, list()):
-                                    entity = None
-                                    if TagoLight.is_of_type(item.get(TagoEntity.PROP_TYPE)):
-                                        entity = TagoLight(item, self)
-                                    elif TagoSwitch.is_of_type(item.get(TagoEntity.PROP_TYPE)):
-                                        entity = TagoSwitch(item, self)
-                                    elif TagoCover.is_of_type(item.get(TagoEntity.PROP_TYPE)):
-                                        entity = TagoCover(item, self)
-                                    elif TagoFan.is_of_type(item.get(TagoEntity.PROP_TYPE)):
-                                        entity = TagoFan(item, self)
-                                    else: ## unused loads
-                                        entity = TagoEntity(item, self)
+                                    try: 
+                                        entity = None
+                                        if TagoLight.is_of_type(item.get(TagoEntity.PROP_TYPE)):
+                                            entity = TagoLight(item, self)
+                                        elif TagoSwitch.is_of_type(item.get(TagoEntity.PROP_TYPE)):
+                                            entity = TagoSwitch(item, self)
+                                        elif TagoCover.is_of_type(item.get(TagoEntity.PROP_TYPE)):
+                                            entity = TagoCover(item, self)
+                                        elif TagoFan.is_of_type(item.get(TagoEntity.PROP_TYPE)):
+                                            entity = TagoFan(item, self)
+                                        else: ## unused loads
+                                            entity = TagoEntity(item, self)
 
-                                    self._entities.append(entity)
+                                        self._entities.append(entity)
+                                    except Exception as e:
+                                        _LOGGER.exception(e)
 
                             break
-
+                    
                     # connected to device!
                     connected.set()
                     for entity in self._entities:
@@ -510,10 +518,10 @@ class TagoDevice(TagoBase):
                             try:
                                 await entity.handle_message(msg)
                             except Exception as e:
-                                _LOGGER.exception(e)
+                                _LOGGER.exception(str(e))
 
-            except Exception:
-                # _LOGGER.exception(e)
+            except Exception as e:
+                _LOGGER.exception(str(e))
                 pass
 
             self._ws = None
@@ -529,7 +537,7 @@ class TagoDevice(TagoBase):
             self.update()
 
             if self._running:
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
 
     async def reboot(self):
         if self.is_connected == False:
@@ -833,8 +841,8 @@ class TagoCover(TagoEntity):
 
 
 class TagoFan(TagoEntity):
-    ONOFF = "fan"
-    DIMMABLE = "fan_dimmable"
+    ONOFF = "fan_onoff"
+    DIMMABLE = "fan_adjustable"
 
     types = [ONOFF, DIMMABLE]
 
@@ -844,7 +852,8 @@ class TagoFan(TagoEntity):
 
     def __init__(self, json: dict, device: TagoDevice):
         super().__init__(json, device)
-        self._value = [0]
+        self._value = 0
+        self.state = self.STATE_OFF
 
     async def turn_on(self):
         await self.send_request(req=self.REQ_TURN_ON)
@@ -863,5 +872,11 @@ class TagoFan(TagoEntity):
 
     def handle_state_change(self, msg: TagoMessage) -> None:
         data = msg.content
-        self._value = data.get("value", self._value)
+        
+        self._value = data.get('value', data.get('brightness', self._value))
+        if data.get('is_on', self._value > 0):            
+            self.state = self.STATE_ON
+        else:
+            self.state = self.STATE_OFF
+            
         super().handle_state_change(msg)

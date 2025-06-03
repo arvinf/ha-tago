@@ -63,7 +63,7 @@ class TagoLightHA(TagoEntityHA, LightEntity):
     @property
     def type_to_string(self) -> int:
         if self._entity.type == TagoLight.LIGHT_ONOFF:
-            return 'ON/OFF Relay'
+            return 'ON/OFF Light'
         if self._entity.type == TagoLight.LIGHT_DIMMABLE:
             return 'Dimmer'
         if self._entity.type == TagoLight.LIGHT_MONO:
@@ -181,10 +181,10 @@ class TagoLightHA(TagoEntityHA, LightEntity):
 
 
 async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
-    lights: list[TagoLightHA] = list()
+    items: list[TagoLightHA] = list()
     device: TagoDevice = entry.runtime_data
     for e in device.entities:
         if type(e) == TagoLight:
-            lights.append(TagoLightHA(e))
+            items.append(TagoLightHA(e))
 
-    async_add_entities(lights)
+    async_add_entities(items)

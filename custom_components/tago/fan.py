@@ -16,10 +16,18 @@ _LOGGER = logging.getLogger(__name__)
 class TagoFanHA(TagoEntityHA, FanEntity):
     def __init__(self, entity: TagoFan):
         super().__init__(entity)
+        
+    @property
+    def type_to_string(self) -> int:
+        if self._entity.type == TagoFan.ONOFF:
+            return 'ON/OFF Fan'
+        if self._entity.type == TagoFan.DIMMABLE:
+            return 'Adjustable Fan'
+        return ''
 
     @property
     def is_on(self):
-        return self._entity.state == TagoFan.STATE_ON and self._entity.value[0] > 0
+        return self._entity.state == TagoFan.STATE_ON 
 
     @property
     def supported_features(self) -> int | None:
@@ -27,7 +35,7 @@ class TagoFanHA(TagoEntityHA, FanEntity):
 
     @property
     def percentage(self) -> int | None:
-        return ranged_value_to_percentage(TagoFan.MAX_VALUE, self._entity.value[0])
+        return ranged_value_to_percentage(TagoFan.MAX_VALUE, self._entity.value)
 
     async def async_turn_on(self, percentage=None, preset_mode=None, **kwargs):
         if percentage:
@@ -41,11 +49,11 @@ class TagoFanHA(TagoEntityHA, FanEntity):
     async def async_set_percentage(self, percentage: int) -> None:
         await self._entity.set_speed(percentage)
 
-async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
-    lights: list[TagoFanHA] = list()
+async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):    
+    items: list[TagoFanHA] = list()
     device : TagoDevice = entry.runtime_data
     for e in device.entities:
         if type(e) == TagoFan:
-            lights.append(TagoFanHA(e))
+            items.append(TagoFanHA(e))
 
-    async_add_entities(lights)
+    async_add_entities(items)

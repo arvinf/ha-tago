@@ -67,7 +67,7 @@ class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             self.context.update(
                 {
                     "title_placeholders": {
-                        "device_name": self.device_name
+                        "device_name": f'Device {self.device_name}'
                     }
                 }
             )

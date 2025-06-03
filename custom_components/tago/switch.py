@@ -32,10 +32,10 @@ class TagoSwitchHA(TagoEntityHA, SwitchEntity):
         await self._entity.turn_off()
 
 async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
-    lights: list[TagoSwitchHA] = list()
+    items: list[TagoSwitchHA] = list()
     device: TagoDevice = entry.runtime_data
     for e in device.entities:
         if type(e) == TagoSwitch:
-            lights.append(TagoSwitchHA(e))
+            items.append(TagoSwitchHA(e))
 
-    async_add_entities(lights)
+    async_add_entities(items)

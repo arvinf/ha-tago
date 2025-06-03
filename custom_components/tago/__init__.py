@@ -33,7 +33,7 @@ def generate_device_info(device: TagoDevice) -> DeviceInfo:
 task = None
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:    
     hass.data.setdefault(DOMAIN, {})
     hoststr = entry.data.get(CONF_HOSTSTR) or ''
     authkey = entry.data.get(CONF_AUTHKEY) or ''
