@@ -16,9 +16,6 @@ from .TagoNet import TagoDevice, TagoEntity
 PLATFORMS: list[str] = [Platform.LIGHT, Platform.FAN,
                         Platform.SWITCH, Platform.COVER, Platform.BUTTON, Platform.SENSOR]
 
-_LOGGER = logging.getLogger(__name__)
-
-
 def generate_device_info(device: TagoDevice) -> DeviceInfo:
     return DeviceInfo(
         identifiers={(DOMAIN, device.unique_id)},
@@ -53,7 +50,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                    identifiers={(DOMAIN, e.unique_id)}
                 )
                 device_registry.async_remove_device( device_entry.id)
-                _LOGGER.debug(f"Removed unused device '{e.unique_id}'")
+                logging.debug(f"Removed unused device '{e.unique_id}'")
             except:
                 pass
 
@@ -72,6 +69,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
-        _LOGGER.debug("Unloaded entry for %s", entry.entry_id)
+        logging.debug("Unloaded entry for %s", entry.entry_id)
 
     return unload_ok

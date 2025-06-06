@@ -20,8 +20,6 @@ from .const import (
     DOMAIN,
 )
 
-_LOGGER = logging.getLogger(__name__)
-
 
 class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 8
@@ -110,7 +108,7 @@ class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             # Proceed to the final step
 
         except (ConnectionError, asyncio.TimeoutError) as e:
-            _LOGGER.debug(f"Connection failed: {str(e)}")
+            logging.debug(f"Connection failed: {str(e)}")
             self.errors["base"] = "cannot_connect"
 
             # Return to the previous step with an error
@@ -120,7 +118,7 @@ class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
 
         except PermissionError as e:
             logging.exception(e)
-            _LOGGER.debug(f"Authentication failed: {str(e)}")
+            logging.debug(f"Authentication failed: {str(e)}")
             self.errors["base"] = "invalid_auth"
 
             # Return to the previous step with an error
@@ -132,7 +130,7 @@ class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id(device.serial_num)
         self._abort_if_unique_id_configured()
 
-        _LOGGER.debug(
+        logging.debug(
             f"Successfully connected to Tago device {device.serial_num}"
         )
         return self.async_create_entry(

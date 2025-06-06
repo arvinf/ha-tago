@@ -9,9 +9,6 @@ from homeassistant.config_entries import ConfigEntry
 from .entity import TagoEntityHA
 from .TagoNet import TagoDevice, TagoSwitch
 
-_LOGGER = logging.getLogger(__name__)
-
-
 class TagoSwitchHA(TagoEntityHA, SwitchEntity):
     def __init__(self, entity: TagoSwitch):
         super().__init__(entity)

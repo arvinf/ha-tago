@@ -14,9 +14,6 @@ import uuid
 
 from websockets.asyncio.client import ClientConnection, connect as wsconnect
 
-_LOGGER = logging.getLogger(__name__)
-
-
 class TagoMessage:
     PROP_DST = 'dst'
     PROP_RSP = 'rsp'
@@ -121,6 +118,10 @@ class TagoBase:
     EVT_STATE_CHANGED = "state_changed"
     REQ_GET_CONFIG = "get_config"
     EVT_CONFIG_CHANGED = "config_changed"
+    EVT_MODBUS = "modbus_evt"
+    EVT_KEYPAD = "keypad_evt"    
+    EVT_MOTION = "motion_evt"
+    EVT_IO = "io_evt"
         
     STATE_ON = "ON"
     STATE_OFF = "OFF"
@@ -312,6 +313,9 @@ class TagoDevice(TagoBase):
     @property
     def is_connected(self):
         return self._ws is not None
+    
+    def input_event_message(self, msg: TagoMessage) -> None:
+        pass
 
     async def connect(self, timeout: float | None = None) -> None:
         """Connect function that waits for connection or error with optional timeout."""
@@ -383,7 +387,7 @@ class TagoDevice(TagoBase):
                     flag.set()
 
         payload = msg.get_message()
-        _LOGGER.debug(f"=== outgoing {payload}")
+        logging.debug(f"=== outgoing {payload}")
         await self._ws.send(payload)
         if responseTimeout:
             async with asyncio.timeout(responseTimeout):
@@ -404,7 +408,7 @@ class TagoDevice(TagoBase):
 
                 return ssl_context
             except Exception as e:
-                _LOGGER.exception(e)
+                logging.exception(e)
 
         return await asyncio.get_running_loop().run_in_executor(
             None, _create_context, self
@@ -414,13 +418,13 @@ class TagoDevice(TagoBase):
         self._running = True
         while self._running:
             try:
-                _LOGGER.debug(f"connecting to {self.uri}")
+                logging.debug(f"connecting to {self.uri}")
                 if self._usessl:
                     ssl_context = await self.get_ssl_context()
                 else:
                     ssl_context = None
                 async with wsconnect(uri=self.uri, ping_timeout=1, ping_interval=3, close_timeout=5, ssl=ssl_context) as ws:
-                    _LOGGER.debug(f"connected to {self.uri}")
+                    logging.debug(f"connected to {self.uri}")
                     self._ws = ws
                     # login
                     try:
@@ -478,7 +482,7 @@ class TagoDevice(TagoBase):
                     # refresh entities list and types
                     await self.send_request(req=TagoDevice.REQ_LIST_NODES)
                     async for message in ws:
-                        _LOGGER.debug(f"=== incoming {message}")
+                        logging.debug(f"=== incoming {message}")
                         msg = TagoMessage.from_payload(message)                        
                         if msg.is_response([TagoDevice.REQ_LIST_NODES]):                            
                             for key, value in msg.data.get(TagoDevice.PROP_NODES, dict()).items():                                
@@ -498,7 +502,7 @@ class TagoDevice(TagoBase):
 
                                         self._entities.append(entity)
                                     except Exception as e:
-                                        _LOGGER.exception(e)
+                                        logging.exception(e)
 
                             break
                     
@@ -511,17 +515,20 @@ class TagoDevice(TagoBase):
                     # process all messages from device
                     async for message in ws:
                         msg = TagoMessage.from_payload(message)
-                        if msg.src == self._eid and msg.is_event([TagoDevice.EVT_CONFIG_CHANGED]):
-                            pass
+                        if msg.src == self._eid:
+                            if msg.is_event([TagoDevice.EVT_CONFIG_CHANGED]):
+                                pass
+                            elif msg.is_event([TagoDevice.EVT_KEYPAD, TagoDevice.EVT_MOTION, TagoDevice.EVT_IO]):
+                                self.input_event_message(msg)
 
                         for entity in self._entities:
                             try:
                                 await entity.handle_message(msg)
                             except Exception as e:
-                                _LOGGER.exception(str(e))
+                                logging.exception(str(e))
 
             except Exception as e:
-                _LOGGER.exception(str(e))
+                logging.exception(str(e))
                 pass
 
             self._ws = None
@@ -532,7 +539,7 @@ class TagoDevice(TagoBase):
                     try:
                         await entity.connection_state_changed(False)
                     except Exception as e:
-                        _LOGGER.exception(e)
+                        logging.exception(e)
                 connected.clear()
             self.update()
 
@@ -611,7 +618,7 @@ class Ramp:
 
                 await asyncio.sleep(self.update_interval)
             except Exception as e:
-                _LOGGER.exception(e)
+                logging.exception(e)
 
     def cancel(self):
         if self.task:

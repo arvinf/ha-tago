@@ -10,9 +10,6 @@ from homeassistant.util.percentage import ranged_value_to_percentage
 from .entity import TagoEntityHA
 from .TagoNet import TagoDevice, TagoFan
 
-_LOGGER = logging.getLogger(__name__)
-
-
 class TagoFanHA(TagoEntityHA, FanEntity):
     def __init__(self, entity: TagoFan):
         super().__init__(entity)

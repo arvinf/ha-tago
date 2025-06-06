@@ -14,8 +14,6 @@ from homeassistant.config_entries import ConfigEntry
 from .entity import TagoEntityHA
 from .TagoNet import TagoCover, TagoDevice
 
-_LOGGER = logging.getLogger(__name__)
-
 class TagoCoverHA(TagoEntityHA, CoverEntity):
     def __init__(self, entity: TagoCover):
         super().__init__(entity)

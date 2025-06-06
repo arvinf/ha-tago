@@ -21,9 +21,6 @@ from .const import ATTR_RATE
 from .entity import TagoEntityHA
 from .TagoNet import TagoDevice, TagoLight
 
-_LOGGER = logging.getLogger(__name__)
-
-
 class TagoLightHA(TagoEntityHA, LightEntity):
     _attr_supported_color_modes = [ColorMode.XY, ColorMode.COLOR_TEMP]
     _attr_supported_features = LightEntityFeature.TRANSITION | LightEntityFeature.FLASH
