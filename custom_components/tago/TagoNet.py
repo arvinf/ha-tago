@@ -507,6 +507,7 @@ class TagoDevice(TagoBase):
                             break
                     
                     # connected to device!
+                    asyncio.sleep(0.5)
                     connected.set()
                     for entity in self._entities:
                         await entity.connection_state_changed(True)
@@ -602,13 +603,14 @@ class Ramp:
                            self.start_time) + self.elapsed
                 # ramp finished?
                 if elapsed > self.duration:
+                    self.cancel()
                     return
 
                 progress = min(elapsed / self.duration, 1.0)
 
                 values = self.start.copy()
                 for i in range(len(values)):
-                    if values[i] is None:
+                    if values[i] is None or self.end[i] is None or self.start[i] is None:
                         continue
                     values[i] = self.start[i] + \
                         (progress * (self.end[i] - self.start[i]))
