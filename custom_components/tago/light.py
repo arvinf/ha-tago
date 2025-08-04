@@ -22,8 +22,8 @@ from .entity import TagoEntityHA
 from .TagoNet import TagoDevice, TagoLight
 
 class TagoLightHA(TagoEntityHA, LightEntity):
-    _attr_supported_color_modes = [ColorMode.XY, ColorMode.COLOR_TEMP]
-    _attr_supported_features = LightEntityFeature.TRANSITION | LightEntityFeature.FLASH
+    #_attr_supported_color_modes = [ColorMode.XY, ColorMode.COLOR_TEMP]
+    #_attr_supported_features = LightEntityFeature.TRANSITION | LightEntityFeature.FLASH
 
     def __init__(self, entity: TagoLight):        
         super().__init__(entity)
@@ -39,7 +39,7 @@ class TagoLightHA(TagoEntityHA, LightEntity):
 
     @property
     def supported_features(self) -> int | None:
-        return LightEntityFeature.TRANSITION
+        return LightEntityFeature.TRANSITION | LightEntityFeature.FLASH
 
     @property
     def supported_color_modes(self) -> set[ColorMode] | set[str] | None:
