@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
-from urllib.parse import urlparse
+
 import voluptuous as vol
 
 from homeassistant import config_entries
@@ -21,12 +21,13 @@ from .const import (
 )
 
 
+_LOGGER = logging.getLogger(__name__)
+
+
 class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 8
 
     def __init__(self):
-        self.data = {}
-        self.link_task: asyncio.Task | None = None
         self.errors = {}
         self.device_name = None  # Ensure device_name is initialized
         self.hoststr = None  # Store URI for connection testing
@@ -35,7 +36,7 @@ class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         if user_input is not None:
-            self.authkey = user_input[CONF_AUTHKEY].strip()
+            self.authkey = user_input.get(CONF_AUTHKEY, "").strip()
             self.hoststr  = user_input[CONF_HOSTSTR].strip()
 
             return await self.async_step_test_connection()
@@ -99,16 +100,16 @@ class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Test the connection to the device."""
         self.errors = {}  # Reset errors
+        device: TagoDevice | None = None
 
         try:
             device = TagoDevice(self.hoststr, self.authkey)
             await device.connect(timeout=5.0)
-            await device.disconnect(timeout=3.0)
             device_id = device.unique_id
             # Proceed to the final step
 
-        except (ConnectionError, asyncio.TimeoutError) as e:
-            logging.debug(f"Connection failed: {str(e)}")
+        except (ConnectionError, OSError, TimeoutError, asyncio.TimeoutError) as e:
+            _LOGGER.debug("Connection failed: %s", str(e))
             self.errors["base"] = "cannot_connect"
 
             # Return to the previous step with an error
@@ -117,22 +118,25 @@ class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             return await self.async_step_user()
 
         except PermissionError as e:
-            logging.exception(e)
-            logging.debug(f"Authentication failed: {str(e)}")
+            _LOGGER.debug("Authentication failed: %s", str(e))
             self.errors["base"] = "invalid_auth"
 
             # Return to the previous step with an error
             if "zeroconf" in self.context.get("source", ""):
                 return await self.async_step_zeroconf_confirm()
             return await self.async_step_user()
+        finally:
+            if device is not None:
+                try:
+                    await device.disconnect(timeout=3.0)
+                except Exception as err:
+                    _LOGGER.debug("Connection cleanup failed: %s", err)
 
         """Finalize the configuration after a successful connection."""
         await self.async_set_unique_id(device.serial_num)
         self._abort_if_unique_id_configured()
 
-        logging.debug(
-            f"Successfully connected to Tago device {device.serial_num}"
-        )
+        _LOGGER.debug("Successfully connected to Tago device %s", device.serial_num)
         return self.async_create_entry(
             title=f'{device.model_num} {device.serial_num}',
             data={
