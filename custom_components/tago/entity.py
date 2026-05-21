@@ -22,10 +22,10 @@ class TagoEntityHA:
 
     def __repr__(self):
         return json.dumps({
-            'id': self._uid,
+            'id': self.unique_id,
             'name': self.name,
-            'location': self._location,
-            'type': self._type,
+            'location': self._entity.location,
+            'type': self.type,
             'connected': self.available
         }, indent=2)
 

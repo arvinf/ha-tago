@@ -2,21 +2,9 @@ from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.entity import DeviceInfo
-
-from .const import DOMAIN
 
 from .TagoNet import TagoDevice
 from . import generate_device_info
-
-def generate_device_info(device: TagoDevice) -> DeviceInfo:
-    return DeviceInfo(
-        identifiers={(DOMAIN, device.unique_id)},
-        name=device.name,
-        manufacturer=device.manufacturer,
-        model=device.model_num,
-        configuration_url=device.dashboard_uri,
-    )
 
 async def async_setup_entry(
     hass: HomeAssistant,

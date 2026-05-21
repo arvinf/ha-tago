@@ -7,6 +7,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.device_registry import async_get as async_get_device_registry
 from homeassistant.helpers.entity import DeviceInfo
 
@@ -40,7 +41,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry_data = hass.data[DOMAIN].setdefault(entry.entry_id, {})
 
     device = TagoDevice(hoststr, authkey)
-    await device.connect()
+
+    try:
+        await device.connect(timeout=10.0)
+    except (TimeoutError, ConnectionError, OSError, asyncio.TimeoutError) as err:
+        raise ConfigEntryNotReady(
+            f"Unable to connect to TAGO device at {hoststr}: {err}"
+        ) from err
 
     entry.runtime_data = device
     for e in device.entities:

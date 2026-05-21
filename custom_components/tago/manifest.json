@@ -1,10 +1,10 @@
 {
   "domain": "tago",
   "name": "Tago Lighting",
-  "version": "1.4",
+  "version": "1.5",
   "config_flow": true,
   "documentation": "https://www.home-assistant.io/integrations/tago",
-  "requirements": ["PyCryptodome>=3.19.0"],
+  "requirements": [],
   "zeroconf": ["_tagodev._tcp.local."],
   "homekit": {},
   "codeowners": [""],

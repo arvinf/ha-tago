@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import contextlib
+from collections.abc import Awaitable, Callable
 import hashlib
 import json
 import logging
@@ -67,7 +68,7 @@ class TagoMessage:
         return self
 
     def get_message(self) -> str:
-        data = self.data
+        data = dict(self.data or {})
         if self.dst:
             data[TagoMessage.PROP_DST] = self.dst
         data[TagoMessage.PROP_REF] = TagoMessage.create_random_str()
@@ -117,8 +118,7 @@ class TagoBase:
     REQ_GET_STATE = "get_state"
     EVT_STATE_CHANGED = "state_changed"
     REQ_GET_CONFIG = "get_config"
-    EVT_CONFIG_CHANGED = "config_changed"
-    EVT_MODBUS = "modbus_evt"
+    EVT_CONFIG_CHANGED = "config_changed"    
     EVT_KEYPAD = "keypad_evt"    
     EVT_MOTION = "motion_evt"
     EVT_IO = "io_evt"
@@ -154,8 +154,16 @@ class TagoEntity(TagoBase):
     def __init__(self, json: dict, device: TagoDevice):
         super().__init__(json[TagoEntity.PROP_ID])
         self._device: TagoDevice = device
-        self._name: str = json.get(TagoEntity.PROP_NAME)
-        self._location: str = json.get(TagoEntity.PROP_LOCATION)
+        name = json.get(TagoEntity.PROP_NAME)
+        if isinstance(name, str):
+            name = name.strip() or None
+
+        location = json.get(TagoEntity.PROP_LOCATION)
+        if isinstance(location, str):
+            location = location.strip() or None
+
+        self._name: str | None = name
+        self._location: str | None = location
         self._type: str = json.get(TagoEntity.PROP_TYPE, self.VALUE_UNUSED)
         self._fault: list[str] = list()
         self._tag = json.get(TagoEntity.PROP_TAG)
@@ -217,31 +225,38 @@ class TagoEntity(TagoBase):
             # request state refresh
             await self.send_request(req=self.REQ_GET_STATE)        
 
-    async def send_request(self, req: str, data: dict = {}) -> None:
+    async def send_request(self, req: str, data: dict | None = None) -> None:
+        if data is None:
+            data = {}
         await self._device.send_request(req=req, dst=self._eid, data=data)
 
-    def handle_event(self, msg: TagoMessage) -> None:
+    def should_handle_message(self, msg: TagoMessage) -> bool:
+        return msg.source == self._eid
+
+    async def handle_event(self, msg: TagoMessage) -> None:
         if msg.is_event(self.EVT_STATE_CHANGED):
-            self.handle_state_change(msg)
+            await self.handle_state_change(msg)
         elif msg.is_event(self.EVT_CONFIG_CHANGED):
-            self.handle_config_change(msg)
+            await self.handle_config_change(msg)
 
-    async def handle_message(self, msg: TagoMessage) -> None:
-        if msg.source != self._eid:
-            return
+    async def handle_state_change(self, msg: TagoMessage) -> None:
+        self.update()
 
+    async def handle_config_change(self, msg: TagoMessage) -> None:
+        self.update()
+
+    async def _handle_message(self, msg: TagoMessage) -> None:
         if msg.is_event():
-            self.handle_event(msg)
+            await self.handle_event(msg)
         elif msg.is_response(self.REQ_GET_STATE):
-            self.handle_state_change(msg)
+            await self.handle_state_change(msg)
         elif msg.is_response(self.REQ_GET_CONFIG):
-            self.handle_config_change(msg)
+            await self.handle_config_change(msg)
 
-    def handle_state_change(self, msg: TagoMessage) -> None:
-        self.update()
-
-    def handle_config_change(self, msg: TagoMessage) -> None:
-        self.update()
+    def handle_message(self, msg: TagoMessage) -> Awaitable[None] | None:
+        if not self.should_handle_message(msg):
+            return None
+        return self._handle_message(msg)
 
     @staticmethod
     def convert_value_to_float(value: int, max=1.0) -> float:
@@ -258,6 +273,9 @@ class TagoDevice(TagoBase):
     REQ_DEVICE_IDENTIFY = 'identify'
     PROP_NODES = 'nodes'
     PROP_LOADS = 'loads'
+    AUTH_HEADER = 'x-tago-auth'
+    AUTH_LEGACY = 'legacy'
+    AUTH_HMAC_TLS_V2 = 'hmac_tls_v2'
 
     def __init__(self, hoststr: str, authkey: str = None, useSSL: bool = False):
         super().__init__(None)
@@ -272,9 +290,11 @@ class TagoDevice(TagoBase):
         self._ws: ClientConnection = None
         self._task: asyncio.Task = None
         self._running: bool = False
-        self._connected_flag = asyncio.Event()
-        self._disconnected_flag = asyncio.Event()
+        self._startup_future: asyncio.Future[None] | None = None
         self._entities: list[TagoEntity] = list()
+        self._log_throttle_interval_s = 60.0
+        self._log_throttle_last: dict[str, float] = {}
+        self._log_throttle_suppressed: dict[str, int] = {}
 
     @property
     def dashboard_uri(self):
@@ -317,62 +337,194 @@ class TagoDevice(TagoBase):
     def input_event_message(self, msg: TagoMessage) -> None:
         pass
 
-    async def connect(self, timeout: float | None = None) -> None:
-        """Connect function that waits for connection or error with optional timeout."""
-        # Create the two event flags
-        connected = asyncio.Event()
-        autherror = asyncio.Event()
+    def _get_server_handshake_headers(self, ws: ClientConnection) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        response = getattr(ws, 'response', None)
+        if response is None:
+            return headers
 
-        self._running = False
-        if self._ws:
-            self._ws.close()
-        if self._task:
-            self._task.cancel()
+        response_headers = getattr(response, 'headers', None)
+        if response_headers is None:
+            return headers
 
-        self._task = asyncio.create_task(
-            self.connection_task(connected, autherror))
-        # try:
-        # Wait for either connected or error to be set, with optional timeout
-        done, pending = await asyncio.wait(
-            [asyncio.create_task(connected.wait()),
-             asyncio.create_task(autherror.wait())],
-            return_when=asyncio.FIRST_COMPLETED,
-            timeout=timeout
+        try:
+            for key, value in response_headers.items():
+                headers[str(key).lower()] = str(value)
+        except Exception as err:
+            logging.debug('Unable to read handshake response headers: %s', err)
+
+        return headers
+
+    def _select_auth_strategy(self, headers: dict[str, str]) -> str:
+        auth_header = headers.get(self.AUTH_HEADER, '')
+        mode = auth_header.split(',')[0].strip().lower() if auth_header else ''
+
+        if not mode:
+            return self.AUTH_LEGACY
+
+        if mode in (self.AUTH_LEGACY, self.AUTH_HMAC_TLS_V2):
+            return mode
+
+        logging.warning(
+            'Unsupported auth mode "%s" from %s, falling back to legacy auth',
+            mode,
+            self._hoststr,
+        )
+        return self.AUTH_LEGACY
+
+    async def _authenticate_legacy(self, ws: ClientConnection) -> dict[str, str | None]:
+        await ws.send('{}')
+        msg = json.loads(await ws.recv())
+
+        status = msg.get('status', 0)
+        serialnum = msg.get('serialnum')
+        model_num = msg.get('model')
+        firmware_rev = msg.get('firmware')
+
+        if status != 200:
+            if msg.get('nonce') is None:
+                raise PermissionError('No login message from server')
+
+            server_nonce = msg.get('nonce')
+            client_nonce = uuid.uuid4().hex
+            sha256 = hashlib.sha256()
+            sha256.update((client_nonce + self._authkey +
+                           server_nonce).encode('utf-8'))
+            authcode = sha256.hexdigest()
+
+            await ws.send(json.dumps({
+                'nonce': client_nonce,
+                'auth': authcode
+            }))
+
+            msg = json.loads(await ws.recv())
+            if msg.get('status', 0) != 200:
+                raise PermissionError('Legacy login failed')
+
+            serialnum = serialnum or msg.get('serialnum')
+            model_num = model_num or msg.get('model')
+            firmware_rev = firmware_rev or msg.get('firmware')
+
+            ca = msg.get('ca', None)
+            # if refresh_ca and ca:
+            #     ca_hash = msg.get('ca_hash', '')
+            #     sha256 = hashlib.sha256()
+            #     sha256.update(
+            #         (ca + client_nonce + self._authkey).encode('utf-8'))
+            #     hash = sha256.hexdigest()
+            #     if ca_hash == hash:
+            #         self._ca = ca
+            #     else:
+            #         logging.error('unexpected ca hash {ca_hash} {hash}')
+
+        return {
+            'serialnum': serialnum,
+            'model': model_num,
+            'firmware': firmware_rev,
+        }
+
+    async def _authenticate_hmac_tls_v2(
+        self, ws: ClientConnection, headers: dict[str, str]
+    ) -> dict[str, str | None]:
+        raise PermissionError(
+            'Device requires auth mode hmac_tls_v2, which is not implemented in this integration version'
         )
 
-        # Check if timeout occurred
-        if not done:
-            self._task.cancel()
-            raise TimeoutError("Connection timed out")
+    async def _authenticate_connection(self, ws: ClientConnection) -> dict[str, str | None]:
+        headers = self._get_server_handshake_headers(ws)
+        auth_mode = self._select_auth_strategy(headers)
+        logging.debug('Selected auth mode "%s" for %s', auth_mode, self._hoststr)
 
-        # Check which event was set
-        if connected.is_set():
-            return  # Success case
-        if autherror.is_set():
-            self._task.cancel()
-            raise PermissionError("Authentication failed")
+        if auth_mode == self.AUTH_HMAC_TLS_V2:
+            return await self._authenticate_hmac_tls_v2(ws, headers)
+
+        return await self._authenticate_legacy(ws)
+
+    def _signal_startup_success(self) -> None:
+        if self._startup_future and not self._startup_future.done():
+            self._startup_future.set_result(None)
+
+    def _signal_startup_error(self, err: Exception) -> None:
+        if self._startup_future and not self._startup_future.done():
+            self._startup_future.set_exception(err)
+
+    def _log_exception_throttled(
+        self, key: str, message: str, err: Exception
+    ) -> None:
+        now = time.monotonic()
+        last_logged = self._log_throttle_last.get(key, 0.0)
+        suppressed = self._log_throttle_suppressed.get(key, 0)
+
+        if (now - last_logged) >= self._log_throttle_interval_s:
+            suffix = f" (suppressed {suppressed} similar errors)" if suppressed else ""
+            logging.exception("%s: %s%s", message, err, suffix)
+            self._log_throttle_last[key] = now
+            self._log_throttle_suppressed[key] = 0
+            return
+
+        self._log_throttle_suppressed[key] = suppressed + 1
+
+    async def connect(self, timeout: float | None = None) -> None:
+        """Ensure the connection manager is running and wait for startup."""
+        if self._ws is not None:
+            return
+
+        if self._startup_future is None or self._startup_future.done():
+            self._startup_future = asyncio.get_running_loop().create_future()
+
+        if self._task is None or self._task.done():
+            self._running = True
+            self._task = asyncio.create_task(self.connection_task())
+
+        startup_future = self._startup_future
+        if startup_future is None:
+            raise RuntimeError("Connection manager did not initialize startup state")
+
+        try:
+            if timeout is None:
+                await asyncio.shield(startup_future)
+            else:
+                await asyncio.wait_for(asyncio.shield(startup_future), timeout=timeout)
+        except asyncio.TimeoutError as err:
+            self._running = False
+            if self._ws:
+                await self._ws.close()
+            if self._task and not self._task.done():
+                self._task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._task
+            self._task = None
+            self._startup_future = None
+            raise TimeoutError("Connection timed out") from err
 
     async def disconnect(self, timeout: float | None = None) -> None:
         self._running = False
         if self._ws:
             await self._ws.close()
 
+        if self._task is None:
+            return
+
         if timeout is None:
             await self._task
         else:
             try:
                 await asyncio.wait_for(self._task, timeout=timeout)
-            except TimeoutError:
+            except asyncio.TimeoutError as err:
                 raise TimeoutError(
-                    "Timed out waiting for self._task to complete")
+                    "Timed out waiting for self._task to complete") from err
 
-        if self._task.exception() is not None:
+        if not self._task.cancelled() and self._task.exception() is not None:
             raise self._task.exception()
         self._task = None
+        self._startup_future = None
 
-    async def send_request(self, req: str, data: dict = dict(), dst: str = None, responseTimeout: float = None) -> None | TagoMessage:
+    async def send_request(self, req: str, data: dict | None = None, dst: str = None, responseTimeout: float = None) -> None | TagoMessage:
         if self._ws is None:
             return None
+
+        if data is None:
+            data = {}
 
         """ sends a message to peer, and optionally waits for a response to be received or a timeout to occur. """
         msg = TagoMessage.make_request(req=req, dst=dst, data=data)
@@ -414,9 +566,50 @@ class TagoDevice(TagoBase):
             None, _create_context, self
         )
 
-    async def connection_task(self, connected: asyncio.Event, autherror: asyncio.Event) -> None:
+    async def _refresh_entities_from_list_nodes(self, ws: ClientConnection) -> None:
+        """Refresh entities from list_nodes response."""
+        await self.send_request(req=TagoDevice.REQ_LIST_NODES)
+        async for message in ws:
+            logging.debug(f"=== incoming {message}")
+            msg = TagoMessage.from_payload(message)
+            if not msg.is_response([TagoDevice.REQ_LIST_NODES]):
+                continue
+
+            # Keep existing entity instances so HA entities retain callbacks.
+            existing_entities = {
+                entity.unique_id: entity for entity in self._entities
+            }
+
+            for key, value in msg.data.get(TagoDevice.PROP_NODES, dict()).items():
+                for item in value.get(TagoDevice.PROP_LOADS, list()):
+                    try:
+                        entity_id = item.get(TagoEntity.PROP_ID)
+                        if entity_id in existing_entities:
+                            continue
+
+                        entity = None
+                        if TagoLight.is_of_type(item.get(TagoEntity.PROP_TYPE)):
+                            entity = TagoLight(item, self)
+                        elif TagoSwitch.is_of_type(item.get(TagoEntity.PROP_TYPE)):
+                            entity = TagoSwitch(item, self)
+                        elif TagoCover.is_of_type(item.get(TagoEntity.PROP_TYPE)):
+                            entity = TagoCover(item, self)
+                        elif TagoFan.is_of_type(item.get(TagoEntity.PROP_TYPE)):
+                            entity = TagoFan(item, self)
+                        else:  # unused loads
+                            entity = TagoEntity(item, self)
+
+                        self._entities.append(entity)
+                        existing_entities[entity.unique_id] = entity
+                    except Exception as e:
+                        logging.exception(e)
+
+            return
+
+    async def connection_task(self) -> None:
         self._running = True
         while self._running:
+            was_connected = False
             try:
                 logging.debug(f"connecting to {self.uri}")
                 if self._usessl:
@@ -426,121 +619,77 @@ class TagoDevice(TagoBase):
                 async with wsconnect(uri=self.uri, ping_timeout=1, ping_interval=3, close_timeout=5, ssl=ssl_context) as ws:
                     logging.debug(f"connected to {self.uri}")
                     self._ws = ws
-                    # login
                     try:
-                        await ws.send('{}')
-                        msg = json.loads(await ws.recv())
-
-                        status = msg.get('status', 0)
-                        serialnum = msg.get('serialnum')
-                        model_num = msg.get('model')
-                        firmware_rev = msg.get('firmware')
-
-                        if status != 200:
-                            if msg.get('nonce') is None:
-                                raise Exception('No login message from server')
-
-                            server_nonce = msg.get('nonce')
-                            client_nonce = uuid.uuid4().hex
-                            sha256 = hashlib.sha256()
-                            sha256.update((client_nonce + self._authkey +
-                                           server_nonce).encode('utf-8'))
-                            authcode = sha256.hexdigest()
-
-                            await ws.send(json.dumps({
-                                'nonce': client_nonce,
-                                'auth': authcode
-                            }))
-
-                            msg = json.loads(await ws.recv())
-                            if msg.get('status', 0) != 200:
-                                raise Exception('login failed')
-
-                            ca = msg.get('ca', None)
-                            # if refresh_ca and ca:
-                            #     ca_hash = msg.get('ca_hash', '')
-                            #     sha256 = hashlib.sha256()
-                            #     sha256.update(
-                            #         (ca + client_nonce + self._authkey).encode('utf-8'))
-                            #     hash = sha256.hexdigest()
-                            #     if ca_hash == hash:
-                            #         self._ca = ca
-                            #     else:
-                            #         logging.error('unexpected ca hash {ca_hash} {hash}')
-
-                        self._serialnum = serialnum
-                        self._modelnum = model_num
-                        self._firmware_rev = firmware_rev
-                        self._eid = serialnum
+                        login_data = await self._authenticate_connection(ws)
+                        self._serialnum = login_data.get('serialnum')
+                        self._modelnum = login_data.get('model')
+                        self._firmware_rev = login_data.get('firmware')
+                        self._eid = self._serialnum
                         self.update()
 
-                    except:
-                        autherror.set()
+                    except PermissionError as err:
                         self._running = False
-                        raise PermissionError('Auth failed')
+                        auth_err = PermissionError('Auth failed')
+                        self._signal_startup_error(auth_err)
+                        raise auth_err from err
                                         
                     # refresh entities list and types
-                    await self.send_request(req=TagoDevice.REQ_LIST_NODES)
-                    async for message in ws:
-                        logging.debug(f"=== incoming {message}")
-                        msg = TagoMessage.from_payload(message)                        
-                        if msg.is_response([TagoDevice.REQ_LIST_NODES]):                            
-                            for key, value in msg.data.get(TagoDevice.PROP_NODES, dict()).items():                                
-                                for item in value.get(TagoDevice.PROP_LOADS, list()):
-                                    try: 
-                                        entity = None
-                                        if TagoLight.is_of_type(item.get(TagoEntity.PROP_TYPE)):
-                                            entity = TagoLight(item, self)
-                                        elif TagoSwitch.is_of_type(item.get(TagoEntity.PROP_TYPE)):
-                                            entity = TagoSwitch(item, self)
-                                        elif TagoCover.is_of_type(item.get(TagoEntity.PROP_TYPE)):
-                                            entity = TagoCover(item, self)
-                                        elif TagoFan.is_of_type(item.get(TagoEntity.PROP_TYPE)):
-                                            entity = TagoFan(item, self)
-                                        else: ## unused loads
-                                            entity = TagoEntity(item, self)
-
-                                        self._entities.append(entity)
-                                    except Exception as e:
-                                        logging.exception(e)
-
-                            break
+                    await self._refresh_entities_from_list_nodes(ws)
                     
                     # connected to device!
-                    connected.set()
+                    was_connected = True
+                    self._signal_startup_success()
                     for entity in self._entities:
                         await entity.connection_state_changed(True)
                     self.update()
 
                     # process all messages from device
                     async for message in ws:
-                        msg = TagoMessage.from_payload(message)
-                        if msg.src == self._eid:
-                            if msg.is_event([TagoDevice.EVT_CONFIG_CHANGED]):
-                                pass
-                            elif msg.is_event([TagoDevice.EVT_KEYPAD, TagoDevice.EVT_MOTION, TagoDevice.EVT_IO]):
-                                self.input_event_message(msg)
+                        msg = TagoMessage.from_payload(message)                                                
 
+                        handlers: list[Awaitable[None]] = []
                         for entity in self._entities:
                             try:
-                                await entity.handle_message(msg)
+                                handler = entity.handle_message(msg)
+                                if handler is not None:
+                                    handlers.append(handler)
                             except Exception as e:
-                                logging.exception(str(e))
+                                self._log_exception_throttled(
+                                    key='entity_message_prepare_error',
+                                    message='Entity message scheduling error',
+                                    err=e,
+                                )
 
+                        if handlers:
+                            results = await asyncio.gather(*handlers, return_exceptions=True)
+                            for result in results:
+                                if isinstance(result, Exception):
+                                    self._log_exception_throttled(
+                                        key='entity_message_error',
+                                        message='Entity message handling error',
+                                        err=result,
+                                    )
+
+            except asyncio.CancelledError:
+                break
             except Exception as e:
-                logging.exception(str(e))
+                self._signal_startup_error(e)
+                self._log_exception_throttled(
+                    key='connection_loop_error',
+                    message='Connection loop error',
+                    err=e,
+                )
                 pass
 
             self._ws = None
 
             # notify disconnection
-            if connected.is_set():
+            if was_connected:
                 for entity in self._entities:
                     try:
                         await entity.connection_state_changed(False)
                     except Exception as e:
                         logging.exception(e)
-                connected.clear()
             self.update()
 
             if self._running:
@@ -578,10 +727,10 @@ class TagoSwitch(TagoEntity):
     async def turn_off(self):
         await self.send_request(req=self.REQ_TURN_OFF)
 
-    def handle_state_change(self, msg: TagoMessage) -> None:
+    async def handle_state_change(self, msg: TagoMessage) -> None:
         data = msg.content
         self._state = data.get("state", self._state)
-        super().handle_state_change(msg)
+        await super().handle_state_change(msg)
 
 
 class Ramp:
@@ -774,7 +923,7 @@ class TagoLight(TagoEntity):
         else:
             self._fault = list()
 
-    def handle_state_change(self, msg: TagoMessage) -> None:
+    async def handle_state_change(self, msg: TagoMessage) -> None:
         data = msg.content
 
         # cancel any running ramps
@@ -811,13 +960,13 @@ class TagoLight(TagoEntity):
             self._ramp = Ramp(start_values, end_values,
                               duration, elapsed, 1/8, self.ramp_update)
 
-        super().handle_state_change(msg)
+        await super().handle_state_change(msg)
 
-    def handle_config_change(self, msg: TagoMessage) -> None:
+    async def handle_config_change(self, msg: TagoMessage) -> None:
         data = msg.content
         self._ct_range_min = data.get(self.PROP_CT_RANGE, self._ct_range_min)
         self._ct_range_max = data.get(self.PROP_CT_RANGE, self._ct_range_max)
-        super().handle_config_change(msg)
+        await super().handle_config_change(msg)
 
 
 class TagoCover(TagoEntity):
@@ -835,16 +984,16 @@ class TagoCover(TagoEntity):
         self._target = 0
 
     async def move_to(self, target: int):
-        await self.send_request(req=self.REQ_MOVE_TO, target=target)
+        await self.send_request(req=self.REQ_MOVE_TO, data={"target": target})
 
     async def stop_move(self):
         await self.send_request(req=self.REQ_STOP)
 
-    def handle_state_change(self, msg: TagoMessage) -> None:
+    async def handle_state_change(self, msg: TagoMessage) -> None:
         data = msg.content
         self._position = data.get("position", self._position)
         self._target = data.get("target", self._target)
-        super().handle_state_change(msg)
+        await super().handle_state_change(msg)
 
 
 class TagoFan(TagoEntity):
@@ -862,6 +1011,10 @@ class TagoFan(TagoEntity):
         self._value = 0
         self.state = self.STATE_OFF
 
+    @property
+    def value(self) -> int:
+        return self._value
+
     async def turn_on(self):
         await self.send_request(req=self.REQ_TURN_ON)
 
@@ -873,11 +1026,10 @@ class TagoFan(TagoEntity):
             await self.turn_off()
             return
 
-        level = math.ceil(percentage_to_ranged_value(
-            self.MAX_VALUE, percentage))
+        level = math.ceil((self.MAX_VALUE * percentage) / 100)
         await self.send_request(req=self.REQ_SET_FAN, data={"value": [level]})
 
-    def handle_state_change(self, msg: TagoMessage) -> None:
+    async def handle_state_change(self, msg: TagoMessage) -> None:
         data = msg.content
         
         self._value = data.get('value', data.get('brightness', self._value))
@@ -886,4 +1038,4 @@ class TagoFan(TagoEntity):
         else:
             self.state = self.STATE_OFF
             
-        super().handle_state_change(msg)
+        await super().handle_state_change(msg)

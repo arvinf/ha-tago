@@ -1,8 +1,6 @@
 """Platform for cover integration."""
 from __future__ import annotations
 
-import logging
-
 from homeassistant.components.cover import (
     ATTR_POSITION,
     CoverDeviceClass,
@@ -27,16 +25,20 @@ class TagoCoverHA(TagoEntityHA, CoverEntity):
         return 100 - self._entity.position
 
     @property
+    def _target_cover_position(self) -> int:
+        return 100 - self._entity.target
+
+    @property
     def is_closed(self) -> bool:
-        return self._entity.position == 100
+        return self.current_cover_position == 0
 
     @property
     def is_closing(self) -> bool:
-        return self._entity.target > self._entity.position
+        return self._target_cover_position < self.current_cover_position
 
     @property
     def is_opening(self) -> bool:
-        return self._entity.target < self._entity.position
+        return self._target_cover_position > self.current_cover_position
 
     @property
     def supported_features(self) -> int | None:
@@ -62,7 +64,7 @@ async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
     items: list[TagoCoverHA] = list()
     device : TagoDevice = entry.runtime_data
     for e in device.entities:
-        if type(e) == TagoCover:
+        if isinstance(e, TagoCover):
             items.append(TagoCoverHA(e))
 
     async_add_entities(items)

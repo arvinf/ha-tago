@@ -1,8 +1,6 @@
 """Platform for light integration."""
 from __future__ import annotations
 
-import logging
-
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
@@ -39,7 +37,7 @@ class TagoLightHA(TagoEntityHA, LightEntity):
 
     @property
     def supported_features(self) -> int | None:
-        return LightEntityFeature.TRANSITION
+        return LightEntityFeature.TRANSITION | LightEntityFeature.FLASH
 
     @property
     def supported_color_modes(self) -> set[ColorMode] | set[str] | None:
@@ -181,7 +179,7 @@ async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
     items: list[TagoLightHA] = list()
     device: TagoDevice = entry.runtime_data
     for e in device.entities:
-        if type(e) == TagoLight:
+        if isinstance(e, TagoLight):
             items.append(TagoLightHA(e))
 
     async_add_entities(items)
