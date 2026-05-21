@@ -108,18 +108,17 @@ class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             device_id = device.unique_id
             # Proceed to the final step
 
-        except (ConnectionError, OSError, TimeoutError, asyncio.TimeoutError) as e:
-            _LOGGER.debug("Connection failed: %s", str(e))
-            self.errors["base"] = "cannot_connect"
+        except PermissionError as e:
+            _LOGGER.debug("Authentication failed: %s", str(e))
+            self.errors["base"] = "invalid_auth"
 
             # Return to the previous step with an error
             if "zeroconf" in self.context.get("source", ""):
                 return await self.async_step_zeroconf_confirm()
             return await self.async_step_user()
-
-        except PermissionError as e:
-            _LOGGER.debug("Authentication failed: %s", str(e))
-            self.errors["base"] = "invalid_auth"
+        except (ConnectionError, OSError, TimeoutError, asyncio.TimeoutError) as e:
+            _LOGGER.debug("Connection failed: %s", str(e))
+            self.errors["base"] = "cannot_connect"
 
             # Return to the previous step with an error
             if "zeroconf" in self.context.get("source", ""):

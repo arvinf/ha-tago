@@ -219,6 +219,20 @@ class TagoEntity(TagoBase):
     def is_unused(self) -> bool:
         return self.type == self.VALUE_UNUSED
 
+    def update_from_discovery_payload(self, payload: dict) -> None:
+        name = payload.get(TagoEntity.PROP_NAME)
+        if isinstance(name, str):
+            name = name.strip() or None
+
+        location = payload.get(TagoEntity.PROP_LOCATION)
+        if isinstance(location, str):
+            location = location.strip() or None
+
+        self._name = name
+        self._location = location
+        self._type = payload.get(TagoEntity.PROP_TYPE, self._type)
+        self._tag = payload.get(TagoEntity.PROP_TAG, self._tag)
+
     async def connection_state_changed(self, connected: bool) -> None:
         self.update()
         if connected:
@@ -464,6 +478,17 @@ class TagoDevice(TagoBase):
 
         self._log_throttle_suppressed[key] = suppressed + 1
 
+    async def _stop_connection_manager(self) -> None:
+        self._running = False
+        if self._ws:
+            await self._ws.close()
+        if self._task and not self._task.done():
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+        self._task = None
+        self._startup_future = None
+
     async def connect(self, timeout: float | None = None) -> None:
         """Ensure the connection manager is running and wait for startup."""
         if self._ws is not None:
@@ -486,16 +511,11 @@ class TagoDevice(TagoBase):
             else:
                 await asyncio.wait_for(asyncio.shield(startup_future), timeout=timeout)
         except asyncio.TimeoutError as err:
-            self._running = False
-            if self._ws:
-                await self._ws.close()
-            if self._task and not self._task.done():
-                self._task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await self._task
-            self._task = None
-            self._startup_future = None
+            await self._stop_connection_manager()
             raise TimeoutError("Connection timed out") from err
+        except Exception:
+            await self._stop_connection_manager()
+            raise
 
     async def disconnect(self, timeout: float | None = None) -> None:
         self._running = False
@@ -575,35 +595,38 @@ class TagoDevice(TagoBase):
             if not msg.is_response([TagoDevice.REQ_LIST_NODES]):
                 continue
 
-            # Keep existing entity instances so HA entities retain callbacks.
-            existing_entities = {
-                entity.unique_id: entity for entity in self._entities
-            }
+            existing_entities = {entity.unique_id: entity for entity in self._entities}
+            refreshed_entities: list[TagoEntity] = []
 
             for key, value in msg.data.get(TagoDevice.PROP_NODES, dict()).items():
                 for item in value.get(TagoDevice.PROP_LOADS, list()):
                     try:
                         entity_id = item.get(TagoEntity.PROP_ID)
-                        if entity_id in existing_entities:
+                        if not entity_id:
                             continue
 
-                        entity = None
+                        created_entity: TagoEntity
                         if TagoLight.is_of_type(item.get(TagoEntity.PROP_TYPE)):
-                            entity = TagoLight(item, self)
+                            created_entity = TagoLight(item, self)
                         elif TagoSwitch.is_of_type(item.get(TagoEntity.PROP_TYPE)):
-                            entity = TagoSwitch(item, self)
+                            created_entity = TagoSwitch(item, self)
                         elif TagoCover.is_of_type(item.get(TagoEntity.PROP_TYPE)):
-                            entity = TagoCover(item, self)
+                            created_entity = TagoCover(item, self)
                         elif TagoFan.is_of_type(item.get(TagoEntity.PROP_TYPE)):
-                            entity = TagoFan(item, self)
+                            created_entity = TagoFan(item, self)
                         else:  # unused loads
-                            entity = TagoEntity(item, self)
+                            created_entity = TagoEntity(item, self)
 
-                        self._entities.append(entity)
-                        existing_entities[entity.unique_id] = entity
+                        existing = existing_entities.get(entity_id)
+                        if existing is not None and type(existing) is type(created_entity):
+                            existing.update_from_discovery_payload(item)
+                            refreshed_entities.append(existing)
+                        else:
+                            refreshed_entities.append(created_entity)
                     except Exception as e:
                         logging.exception(e)
 
+            self._entities = refreshed_entities
             return
 
     async def connection_task(self) -> None:
@@ -998,9 +1021,8 @@ class TagoCover(TagoEntity):
 
 class TagoFan(TagoEntity):
     ONOFF = "fan_onoff"
-    DIMMABLE = "fan_adjustable"
 
-    types = [ONOFF, DIMMABLE]
+    types = [ONOFF]
 
     REQ_SET_FAN = "set_fan"
     REQ_TURN_ON = "turn_on"
