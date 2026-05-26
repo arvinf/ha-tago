@@ -5,6 +5,7 @@ from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
     ATTR_FLASH,
+    ATTR_RGB_COLOR,
     ATTR_TRANSITION,
     ATTR_WHITE,
     ATTR_XY_COLOR,
@@ -17,7 +18,7 @@ from homeassistant.config_entries import ConfigEntry
 
 from .const import ATTR_RATE
 from .entity import TagoEntityHA
-from .TagoNet import TagoDevice, TagoLight
+from .TagoNet import TagoDevice, TagoKeypad, TagoLight
 
 # Commands and state echoes share a single WebSocket whose writes are
 # serialized internally; entity updates can fan out without per-platform
@@ -180,11 +181,91 @@ class TagoLightHA(TagoEntityHA, LightEntity):
         await self._entity.stop_ramp()
 
 
+class TagoKeypadLEDHA(TagoEntityHA, LightEntity):
+    """HA light entity for a keypad's onboard LED. RGB is the only
+    supported color mode (PROTOCOL_PROPOSALS §P2.5). Flash effect is
+    translated to `set_led effect=flash duration=...`.
+
+    `device_info` nests this entity under the parent keypad's
+    device-registry entry so HA users see one device card (the keypad)
+    containing both the LED control and the key triggers, rather than
+    two siblings."""
+
+    _attr_color_mode = ColorMode.RGB
+    _attr_supported_color_modes = {ColorMode.RGB}
+    _attr_supported_features = LightEntityFeature.FLASH
+
+    FLASH_DURATION_SHORT_MS = 4000
+    FLASH_DURATION_LONG_MS = 10000
+
+    def __init__(self, entity: TagoKeypadKey):
+        super().__init__(entity)
+
+    @property
+    def device_info(self):
+        # If the LED knows its parent keypad, attach to that device entry
+        # rather than letting the default TagoEntityHA.device_info create
+        # a sibling entry.
+        keypad_id = self._entity.keypad_id
+        if keypad_id:
+            from homeassistant.helpers.entity import DeviceInfo
+            from .const import DOMAIN
+            return DeviceInfo(identifiers={(DOMAIN, keypad_id)})
+        return super().device_info
+
+    @property
+    def is_on(self) -> bool:
+        return self._entity.is_on
+
+    @property
+    def brightness(self) -> int:
+        # Convert wire 0..1000 → HA 0..255.
+        return self.convert_value_from_device(
+            self._entity.brightness / TagoKeypad.TagoKeypadKey.BRIGHTNESS_MAX
+        )
+
+    @property
+    def rgb_color(self) -> tuple[int, int, int]:
+        return self._entity.rgb
+
+    async def async_turn_on(self, **kwargs) -> None:
+        flash = kwargs.get(ATTR_FLASH)
+        if flash is not None:
+            duration_ms = (
+                self.FLASH_DURATION_SHORT_MS if flash == FLASH_SHORT
+                else self.FLASH_DURATION_LONG_MS
+            )
+            await self._entity.flash(duration_ms)
+            return
+
+        ha_brightness = kwargs.get(ATTR_BRIGHTNESS)
+        wire_brightness: int | None = None
+        if ha_brightness is not None:
+            # HA 0..255 → wire 0..1000.
+            wire_brightness = int(round(
+                self.convert_value_to_device(ha_brightness)
+                * TagoKeypad.TagoKeypadKey.BRIGHTNESS_MAX
+            ))
+
+        rgb = kwargs.get(ATTR_RGB_COLOR)
+        await self._entity.set_led(
+            is_on=True,
+            brightness=wire_brightness,
+            rgb=rgb,
+        )
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await self._entity.turn_off()
+
+
 async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
-    items: list[TagoLightHA] = list()
+    items: list[LightEntity] = []
     device: TagoDevice = entry.runtime_data
     for e in device.entities:
         if isinstance(e, TagoLight):
             items.append(TagoLightHA(e))
+        elif isinstance(e, TagoKeypad):
+            for led in e.leds:
+                items.append(led)
 
     async_add_entities(items)

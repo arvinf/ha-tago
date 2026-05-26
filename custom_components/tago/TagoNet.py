@@ -117,24 +117,37 @@ class TagoBase:
     REQ_GET_STATE = "get_state"
     EVT_STATE_CHANGED = "state_changed"
     REQ_GET_CONFIG = "get_config"
-    EVT_CONFIG_CHANGED = "config_changed"    
-    EVT_KEYPAD = "keypad_evt"    
+    EVT_CONFIG_CHANGED = "config_changed"
+    EVT_KEYPAD = "keypad_evt"
     EVT_MOTION = "motion_evt"
     EVT_IO = "io_evt"
-        
+
     STATE_ON = "ON"
     STATE_OFF = "OFF"
 
     def __init__(self, eid: str):
         self._eid: str = eid
-        self._update_cb = None
+        self._update_cbs: list = []
 
     def set_on_state_changed(self, callback):
-        self._update_cb = callback
+        """Register a state-change listener.
+
+        Multi-listener so a single wire entity can drive more than one
+        HA entity — e.g., a TagoEntity may have both a primary platform
+        entity (light/switch/etc.) and a companion signal-strength
+        sensor (PROTOCOL_PROPOSALS §P6) wrapping the same TagoEntity."""
+        if callback is None:
+            return
+        if callback not in self._update_cbs:
+            self._update_cbs.append(callback)
+
+    def remove_on_state_changed(self, callback) -> None:
+        if callback in self._update_cbs:
+            self._update_cbs.remove(callback)
 
     def update(self) -> None:
-        if self._update_cb:
-            self._update_cb()
+        for cb in list(self._update_cbs):
+            cb()
 
     @property
     def unique_id(self):
@@ -147,6 +160,9 @@ class TagoEntity(TagoBase):
     VALUE_UNUSED = 'UNUSED'
     MAX_VALUE = 1000
 
+    # PROTOCOL_PROPOSALS §P6: optional per-entity RSSI in dBm. Present
+    # only for entities on a wireless link.
+    PROP_RSI = "rsi"
 
     types = []
 
@@ -166,6 +182,8 @@ class TagoEntity(TagoBase):
         self._type: str = json.get(TagoEntity.PROP_TYPE, self.VALUE_UNUSED)
         self._fault: list[str] = list()
         self._tag = json.get(TagoEntity.PROP_TAG)
+        rsi = json.get(TagoEntity.PROP_RSI)
+        self._rsi: int | None = int(rsi) if isinstance(rsi, (int, float)) and not isinstance(rsi, bool) else None
 
         # if len(self._location.strip()):
         #     info = DeviceInfo(
@@ -215,8 +233,19 @@ class TagoEntity(TagoBase):
     def has_fault(self) -> bool:
         return len(self._fault) > 0
 
+    @property
+    def rsi(self) -> int | None:
+        """PROTOCOL_PROPOSALS §P6: most recent RSSI for this entity, or
+        None if it isn't on a wireless link / hasn't reported yet."""
+        return self._rsi
+
     def is_unused(self) -> bool:
         return self.type == self.VALUE_UNUSED
+
+    def _apply_rsi(self, payload: dict) -> None:
+        rsi = payload.get(TagoEntity.PROP_RSI)
+        if isinstance(rsi, (int, float)) and not isinstance(rsi, bool):
+            self._rsi = int(rsi)
 
     def update_from_discovery_payload(self, payload: dict) -> None:
         name = payload.get(TagoEntity.PROP_NAME)
@@ -231,12 +260,13 @@ class TagoEntity(TagoBase):
         self._location = location
         self._type = payload.get(TagoEntity.PROP_TYPE, self._type)
         self._tag = payload.get(TagoEntity.PROP_TAG, self._tag)
+        self._apply_rsi(payload)
 
     async def connection_state_changed(self, connected: bool) -> None:
         self.update()
         if connected:
             # request state refresh
-            await self.send_request(req=self.REQ_GET_STATE)        
+            await self.send_request(req=self.REQ_GET_STATE)
 
     async def send_request(self, req: str, data: dict | None = None) -> None:
         if data is None:
@@ -253,9 +283,15 @@ class TagoEntity(TagoBase):
             await self.handle_config_change(msg)
 
     async def handle_state_change(self, msg: TagoMessage) -> None:
+        # PROTOCOL_PROPOSALS §P6: rsi can land on any state_changed for
+        # entities on a wireless link.
+        if isinstance(msg.content, dict):
+            self._apply_rsi(msg.content)
         self.update()
 
     async def handle_config_change(self, msg: TagoMessage) -> None:
+        if isinstance(msg.content, dict):
+            self._apply_rsi(msg.content)
         self.update()
 
     async def _handle_message(self, msg: TagoMessage) -> None:
@@ -286,6 +322,18 @@ class TagoDevice(TagoBase):
     REQ_DEVICE_IDENTIFY = 'identify'
     PROP_NODES = 'nodes'
     PROP_LOADS = 'loads'
+    # Protocol extensions (PROTOCOL_PROPOSALS.md): additional collection
+    # keys sibling to `loads` in each loads-group node.
+    PROP_SCENES = 'scenes'
+    PROP_KEYPADS = 'keypads'
+    PROP_KEYPAD_LEDS = 'keypad_leds'
+    PROP_VIRTUAL_SWITCHES = 'virtual_switches'
+    PROP_VIRTUAL_SENSORS = 'virtual_sensors'
+    # PROTOCOL_PROPOSALS §P4 + §P5: real sensors collection + firmware
+    # update availability field on the device-level get_config response.
+    PROP_SENSORS = 'sensors'
+    PROP_FIRMWARE_REV = 'firmware_rev'
+    PROP_LATEST_FIRMWARE_REV = 'latest_firmware_rev'
     AUTH_HEADER = 'x-tago-auth'
     AUTH_LEGACY = 'legacy'
     AUTH_HMAC_TLS_V2 = 'hmac_tls_v2'
@@ -298,6 +346,7 @@ class TagoDevice(TagoBase):
         self._modelnum: str = None
         self._serialnum: str = None
         self._firmware_rev: str = None
+        self._latest_firmware_rev: str | None = None
         self._name = None
         self._ca: str = None
         self._ws: ClientConnection = None
@@ -336,6 +385,33 @@ class TagoDevice(TagoBase):
         return self._firmware_rev
 
     @property
+    def latest_firmware_rev(self) -> str | None:
+        """PROTOCOL_PROPOSALS §P5: latest firmware revision the device is
+        aware of. None when the device hasn't reported one (or it equals
+        the running revision — see `firmware_update_available`)."""
+        return self._latest_firmware_rev
+
+    @property
+    def firmware_update_available(self) -> bool:
+        """True iff `latest_firmware_rev` is set, parseable, and strictly
+        greater than `firmware_rev` (dotted-decimal compare). Equal or
+        missing values mean "up to date" — see PROTOCOL_PROPOSALS §P5."""
+        if not self._latest_firmware_rev or not self._firmware_rev:
+            return False
+
+        def _parse(v: str) -> tuple[int, ...] | None:
+            try:
+                return tuple(int(p) for p in v.split("."))
+            except (ValueError, AttributeError):
+                return None
+
+        current = _parse(self._firmware_rev)
+        latest = _parse(self._latest_firmware_rev)
+        if current is None or latest is None:
+            return False
+        return latest > current
+
+    @property
     def manufacturer(self):
         return 'TAGO'
 
@@ -350,7 +426,7 @@ class TagoDevice(TagoBase):
     @property
     def is_connected(self):
         return self._ws is not None
-    
+
     def input_event_message(self, msg: TagoMessage) -> None:
         pass
 
@@ -600,36 +676,84 @@ class TagoDevice(TagoBase):
             existing_entities = {entity.unique_id: entity for entity in self._entities}
             refreshed_entities: list[TagoEntity] = []
 
+            # PROTOCOL.md §9 list_nodes returns a `nodes` map keyed by
+            # loads-group entity ID. Each group's value is a dict
+            # containing arrays of entities under documented keys:
+            #   loads, scenes, keypads, keypad_leds, virtual_switches,
+            #   virtual_sensors (the last five from PROTOCOL_PROPOSALS).
             for key, value in msg.data.get(TagoDevice.PROP_NODES, dict()).items():
-                for item in value.get(TagoDevice.PROP_LOADS, list()):
-                    try:
-                        entity_id = item.get(TagoEntity.PROP_ID)
-                        if not entity_id:
-                            continue
-
-                        created_entity: TagoEntity
-                        if TagoLight.is_of_type(item.get(TagoEntity.PROP_TYPE)):
-                            created_entity = TagoLight(item, self)
-                        elif TagoSwitch.is_of_type(item.get(TagoEntity.PROP_TYPE)):
-                            created_entity = TagoSwitch(item, self)
-                        elif TagoCover.is_of_type(item.get(TagoEntity.PROP_TYPE)):
-                            created_entity = TagoCover(item, self)
-                        elif TagoFan.is_of_type(item.get(TagoEntity.PROP_TYPE)):
-                            created_entity = TagoFan(item, self)
-                        else:  # unused loads
-                            created_entity = TagoEntity(item, self)
-
-                        existing = existing_entities.get(entity_id)
-                        if existing is not None and type(existing) is type(created_entity):
-                            existing.update_from_discovery_payload(item)
-                            refreshed_entities.append(existing)
-                        else:
-                            refreshed_entities.append(created_entity)
-                    except Exception as e:
-                        logging.exception(e)
+                self._extract_entities_from_group(
+                    value, existing_entities, refreshed_entities,
+                )
 
             self._entities = refreshed_entities
             return
+
+    def _extract_entities_from_group(
+        self,
+        group: dict,
+        existing_entities: dict,
+        refreshed_entities: list,
+    ) -> None:
+        """Walk every documented collection inside a loads-group and
+        materialise/refresh entities."""
+        COLLECTIONS = (
+            TagoDevice.PROP_LOADS,
+            TagoDevice.PROP_SCENES,
+            TagoDevice.PROP_KEYPADS,
+            TagoDevice.PROP_KEYPAD_LEDS,
+            TagoDevice.PROP_VIRTUAL_SWITCHES,
+            TagoDevice.PROP_VIRTUAL_SENSORS,
+            TagoDevice.PROP_SENSORS,
+        )
+        for collection_key in COLLECTIONS:
+            for item in group.get(collection_key, list()):
+                try:
+                    entity_id = item.get(TagoEntity.PROP_ID)
+                    if not entity_id:
+                        continue
+                    created_entity = self._build_entity_from_payload(item)
+                    existing = existing_entities.get(entity_id)
+                    if existing is not None and type(existing) is type(created_entity):
+                        existing.update_from_discovery_payload(item)
+                        refreshed_entities.append(existing)
+                    else:
+                        refreshed_entities.append(created_entity)
+                except Exception as e:
+                    logging.exception(e)
+
+    def _build_entity_from_payload(self, item: dict) -> TagoEntity:
+        """Pick the right entity class for a discovery payload based on
+        its `type`. Ordering matters because the type vocabularies don't
+        overlap — first match wins."""
+        t = item.get(TagoEntity.PROP_TYPE)
+        if TagoLight.is_of_type(t):
+            return TagoLight(item, self)
+        if TagoSwitch.is_of_type(t):
+            return TagoSwitch(item, self)
+        if TagoCover.is_of_type(t):
+            return TagoCover(item, self)
+        if TagoFan.is_of_type(t):
+            return TagoFan(item, self)
+        if TagoScene.is_of_type(t):
+            return TagoScene(item, self)
+        if TagoKeypad.is_of_type(t):
+            return TagoKeypad(item, self)
+        if TagoKeypadKey.is_of_type(t):
+            return TagoKeypadKey(item, self)
+        if TagoVirtualSwitch.is_of_type(t):
+            return TagoVirtualSwitch(item, self)
+        if TagoVirtualSensor.is_of_type(t):
+            return TagoVirtualSensor(item, self)
+        if TagoSensor.is_of_type(t):
+            return TagoSensor(item, self)
+        # PROTOCOL_PROPOSALS §P4.2: any other `sensor_*` type is an
+        # unknown sensor — still surface it (with no device class) so
+        # users can automate against it.
+        if isinstance(t, str) and t.startswith("sensor_"):
+            return TagoSensor(item, self)
+        # Unknown / UNUSED — placeholder entity.
+        return TagoEntity(item, self)
 
     async def connection_task(self) -> None:
         self._running = True
@@ -700,13 +824,24 @@ class TagoDevice(TagoBase):
                                 future.set_result(msg)
 
                         # Pick up firmware_rev from the device-level
-                        # get_config response (PROTOCOL.md §9).
-                        if (msg.rsp == TagoBase.REQ_GET_CONFIG
-                                and msg.src == self._eid
-                                and isinstance(msg.data, dict)):
-                            fw = msg.data.get('firmware_rev')
+                        # get_config response (PROTOCOL.md §9) and the
+                        # latest-known firmware_rev (PROTOCOL_PROPOSALS §P5)
+                        # from either the response or a config_changed event
+                        # on the gateway entity.
+                        if (msg.src == self._eid
+                                and isinstance(msg.data, dict)
+                                and (msg.rsp == TagoBase.REQ_GET_CONFIG
+                                     or msg.evt == TagoBase.EVT_CONFIG_CHANGED)):
+                            fw = msg.data.get(TagoDevice.PROP_FIRMWARE_REV)
+                            latest = msg.data.get(TagoDevice.PROP_LATEST_FIRMWARE_REV)
+                            changed = False
                             if fw is not None and fw != self._firmware_rev:
                                 self._firmware_rev = fw
+                                changed = True
+                            if latest is not None and latest != self._latest_firmware_rev:
+                                self._latest_firmware_rev = latest
+                                changed = True
+                            if changed:
                                 self.update()
 
                         handlers: list[Awaitable[None]] = []
@@ -1175,6 +1310,363 @@ class TagoFan(TagoEntity):
 
     async def handle_state_change(self, msg: TagoMessage) -> None:
         # PROTOCOL.md §12.3: on/off entities expose `is_on` (bool) only.
+        data = msg.content
+        if isinstance(data, dict) and self.PROP_IS_ON in data:
+            self._is_on = bool(data[self.PROP_IS_ON])
+        await super().handle_state_change(msg)
+
+
+# =====================================================================
+# Protocol extensions — see PROTOCOL_PROPOSALS.md in the firmware repo.
+# These wire shapes are not yet implemented in shipping firmware; HA-side
+# handling is in place so the integration is ready when the firmware
+# ships.
+# =====================================================================
+
+
+class TagoScene(TagoEntity):
+    """A user-curated scene on the device. PROTOCOL_PROPOSALS §P1."""
+
+    SCENE = "scene"
+    types = [SCENE]
+
+    REQ_ACTIVATE = "activate"
+    EVT_SCENE_ACTIVATED = "scene_activated"
+    PROP_LAST_ACTIVATED_TS = "last_activated_ts"
+
+    def __init__(self, json: dict, device: TagoDevice):
+        super().__init__(json, device)
+        self._last_activated_ts: int = int(json.get(self.PROP_LAST_ACTIVATED_TS, 0) or 0)
+        self._scene_activated_cb = None
+
+    @property
+    def last_activated_ts(self) -> int:
+        return self._last_activated_ts
+
+    def set_on_scene_activated(self, callback) -> None:
+        """Called whenever a `scene_activated` event fires for this scene.
+        Used by the HA scene platform to fire a HA-bus event so automations
+        can listen for scene activation across the whole device."""
+        self._scene_activated_cb = callback
+
+    async def activate(self) -> None:
+        await self.send_request(req=self.REQ_ACTIVATE)
+
+    async def handle_event(self, msg: TagoMessage) -> None:
+        if msg.is_event(self.EVT_SCENE_ACTIVATED):
+            data = msg.content
+            if isinstance(data, dict):
+                ts = data.get("ts")
+                if isinstance(ts, int):
+                    self._last_activated_ts = ts
+            self.update()
+            if self._scene_activated_cb is not None:
+                await self._scene_activated_cb(msg)
+            return
+        await super().handle_event(msg)
+
+
+class TagoKeypad(TagoEntity):
+    """A physical keypad with N keys. PROTOCOL_PROPOSALS §P2.
+
+    Not exposed as an HA entity — the integration registers each keypad as
+    a `device_registry` entry (so users see it as a device card) and
+    forwards key events to HA's bus. Per-key data lives in the `keys`
+    list; the keypad's own LED light is a separate `TagoKeypadKey`
+    entity referenced by `led_id`."""
+
+    KEYPAD_MODULAR = "keypad_modular"
+    types = [KEYPAD_MODULAR]
+
+    PROP_MODEL_NUM = "model_num"
+    PROP_KEYS = "keys"    
+    PROP_KEYPAD_ID = "keypad_id"
+
+    KEY_EVENT_PRESSED = "key_pressed"
+    KEY_EVENT_RELEASED = "key_released"
+    KEY_EVENT_SINGLE_PRESS = "key_single_press"
+    KEY_EVENT_DOUBLE_PRESS = "key_double_press"
+    KEY_EVENT_TRIPLE_PRESS = "key_triple_press"
+    KEY_EVENT_PRESS_HELD = "key_press_held"
+
+    KEY_EVENTS = [
+        KEY_EVENT_PRESSED,
+        KEY_EVENT_RELEASED,
+        KEY_EVENT_SINGLE_PRESS,
+        KEY_EVENT_DOUBLE_PRESS,
+        KEY_EVENT_TRIPLE_PRESS,
+        KEY_EVENT_PRESS_HELD,
+    ]
+    
+    def __init__(self, json: dict, device: TagoDevice):
+        super().__init__(json, device)
+        self._model_num: str = json.get(self.PROP_MODEL_NUM, "") or ""
+        self._leds: list[str] = [TagoKeypad.TagoKeypadKey(self, k) for k in json.get(self.PROP_KEYS, [])]
+        self._key_event_cb = None
+
+    @property
+    def model_num(self) -> str:
+        return self._model_num
+
+    @property
+    def keys(self) -> list[str]:
+        return list(self._keys)
+    
+    def leds(self) -> list[TagoKeypad.TagoKeypadKey]:
+        return list(self._leds)
+
+    def set_on_key_event(self, callback) -> None:
+        """Called for every key_* event arriving for this keypad. Used by
+        the HA-side keypad device wiring to fan events out to hass.bus."""
+        self._key_event_cb = callback
+
+    async def handle_event(self, msg: TagoMessage) -> None:
+        if msg.evt in self.KEY_EVENTS:
+            if self._key_event_cb is not None:
+                await self._key_event_cb(msg)
+            return
+        await super().handle_event(msg)
+
+    class TagoKeypadKey:
+        """The LED on a keypad — addressable via `set_led`. PROTOCOL_PROPOSALS
+        §P2.5. RGB is the only color mode. Supports a `flash` effect with
+        user-supplied duration."""
+
+        REQ_SET_LED = "set_led"
+        REQ_PRESS = "press"
+
+        PROP_IS_ON = "is_on"
+        PROP_BRIGHTNESS = "brightness"
+        PROP_RGB = "rgb"
+        PROP_EFFECT = "effect"
+        PROP_DURATION = "duration"
+        PROP_KEY_ID = "key_id"
+
+        EFFECT_FLASH = "flash"
+
+        BRIGHTNESS_MIN = 0
+        BRIGHTNESS_MAX = 1000
+        EFFECT_DURATION_MIN_MS = 100
+        EFFECT_DURATION_MAX_MS = 60000
+
+        def __init__(self, keypad: TagoKeypad, json: dict):
+            self._keypad = keypad
+            self._key_id = json.get(self.PROP_KEY_ID)
+            self._is_on: bool = bool(json.get(self.PROP_IS_ON, False))
+            self._brightness: int = int(json.get(self.PROP_BRIGHTNESS, 0) or 0)
+            rgb = json.get(self.PROP_RGB) or {}
+            self._rgb: tuple[int, int, int] = (
+                int(rgb.get("r", 0)),
+                int(rgb.get("g", 0)),
+                int(rgb.get("b", 0)),
+            )
+
+        @property
+        def keypad(self) -> str:
+            return self._keypad
+        
+        @property
+        def key_id(self) -> str:
+            return self._key_id
+
+        @property
+        def is_on(self) -> bool:
+            return self._is_on
+
+        @property
+        def brightness(self) -> int:
+            """0..1000 wire scale (same as PROTOCOL.md §5)."""
+            return self._brightness
+
+        @property
+        def rgb(self) -> tuple[int, int, int]:
+            return self._rgb
+        
+        async def press (
+            self,
+            duration_ms: int | None = None,
+        ) -> None:
+            """Convenience: to trigger a virtual key press."""
+            await self.set_led(req=self.REQ_SET_LED, duration_ms=duration_ms)
+
+        async def set_led(
+            self,
+            *,
+            is_on: bool | None = None,
+            brightness: int | None = None,
+            rgb: tuple[int, int, int] | None = None,
+            effect: str | None = None,
+            duration_ms: int | None = None,
+        ) -> None:
+            """Per PROTOCOL_PROPOSALS §P2.5. All args optional; absent fields
+            leave the corresponding LED property unchanged. `effect` and
+            `duration_ms` form a pair — either both or neither."""
+            data: dict = {}
+            if is_on is not None:
+                data[self.PROP_IS_ON] = bool(is_on)
+            if brightness is not None:
+                data[self.PROP_BRIGHTNESS] = max(
+                    self.BRIGHTNESS_MIN, min(self.BRIGHTNESS_MAX, int(brightness))
+                )
+            if rgb is not None:
+                r, g, b = rgb
+                data[self.PROP_RGB] = {
+                    "r": max(0, min(255, int(r))),
+                    "g": max(0, min(255, int(g))),
+                    "b": max(0, min(255, int(b))),
+                }
+            if effect is not None or duration_ms is not None:
+                # Pair must come together — let the firmware reject mismatched
+                # halves rather than silently dropping one.
+                if effect is not None:
+                    data[self.PROP_EFFECT] = effect
+                if duration_ms is not None:
+                    data[self.PROP_DURATION] = max(
+                        self.EFFECT_DURATION_MIN_MS,
+                        min(self.EFFECT_DURATION_MAX_MS, int(duration_ms)),
+                    )
+
+            data[TagoKeypad.PROP_KEY_ID] = self.key_id
+            await self.keypad.send_request(req=self.REQ_SET_LED, data=data)
+
+        async def flash(self, duration_ms: int) -> None:
+            """Convenience: trigger the flash effect for `duration_ms`."""
+            await self.set_led(effect=self.EFFECT_FLASH, duration_ms=duration_ms)
+
+        async def handle_state_change(self, msg: TagoMessage) -> None:
+            data = msg.content
+            if isinstance(data, dict):
+                if self.PROP_IS_ON in data:
+                    self._is_on = bool(data[self.PROP_IS_ON])
+                if self.PROP_BRIGHTNESS in data:
+                    self._brightness = int(data[self.PROP_BRIGHTNESS])
+                rgb = data.get(self.PROP_RGB)
+                if isinstance(rgb, dict):
+                    self._rgb = (
+                        int(rgb.get("r", self._rgb[0])),
+                        int(rgb.get("g", self._rgb[1])),
+                        int(rgb.get("b", self._rgb[2])),
+                    )
+            await super().handle_state_change(msg)
+
+
+class TagoVirtualSwitch(TagoEntity):
+    """A virtual on/off switch — flipped by HA to signal something to the
+    firmware's automation engine. PROTOCOL_PROPOSALS §P3.
+
+    `name` is set by the device; `location` is fixed to `"VIRTUAL"`."""
+
+    VIRTUAL_SWITCH = "virtual_switch"
+    LOCATION_VIRTUAL = "VIRTUAL"
+    types = [VIRTUAL_SWITCH]
+
+    REQ_TURN_ON = "turn_on"
+    REQ_TURN_OFF = "turn_off"
+    REQ_TOGGLE = "toggle"
+    PROP_IS_ON = "is_on"
+    PROP_INDEX = "index"
+
+    def __init__(self, json: dict, device: TagoDevice):
+        super().__init__(json, device)
+        self._is_on: bool = bool(json.get(self.PROP_IS_ON, False))
+        self._index: int = int(json.get(self.PROP_INDEX, 0) or 0)
+
+    @property
+    def is_on(self) -> bool:
+        return self._is_on
+
+    @property
+    def index(self) -> int:
+        return self._index
+
+    async def turn_on(self) -> None:
+        await self.send_request(req=self.REQ_TURN_ON)
+
+    async def turn_off(self) -> None:
+        await self.send_request(req=self.REQ_TURN_OFF)
+
+    async def toggle(self) -> None:
+        await self.send_request(req=self.REQ_TOGGLE)
+
+    async def handle_state_change(self, msg: TagoMessage) -> None:
+        data = msg.content
+        if isinstance(data, dict) and self.PROP_IS_ON in data:
+            self._is_on = bool(data[self.PROP_IS_ON])
+        await super().handle_state_change(msg)
+
+
+class TagoSensor(TagoEntity):
+    """A read-only physical sensor (motion, contact, occupancy, etc.).
+    PROTOCOL_PROPOSALS §P4.
+
+    The firmware reports an `is_on` boolean on `list_nodes`/`get_state`
+    and emits `state_changed` whenever the underlying input flips. The
+    wire `type` carries which kind of sensor it is (`sensor_motion`,
+    `sensor_door`, ...); HA maps that to the right `BinarySensorDeviceClass`.
+
+    Write commands (`turn_on`/`turn_off`/`toggle`/`set_light`) are
+    rejected by the firmware with status 500 — sensors are the device's
+    eyes, not its hands."""
+
+    SENSOR_LIGHT = "sensor_light"
+    SENSOR_MOTION = "sensor_motion"
+    SENSOR_OCCUPANCY = "sensor_occupancy"
+    SENSOR_OPENING = "sensor_opening"
+    SENSOR_PRESENCE = "sensor_presence"
+    SENSOR_DOOR = "sensor_door"
+    SENSOR_WINDOW = "sensor_window"
+
+    types = [
+        SENSOR_LIGHT, SENSOR_MOTION, SENSOR_OCCUPANCY, SENSOR_OPENING,
+        SENSOR_PRESENCE, SENSOR_DOOR, SENSOR_WINDOW,
+    ]
+
+    PROP_IS_ON = "is_on"
+
+    def __init__(self, json: dict, device: TagoDevice):
+        super().__init__(json, device)
+        self._is_on: bool = bool(json.get(self.PROP_IS_ON, False))
+
+    @property
+    def is_on(self) -> bool:
+        return self._is_on
+
+    async def handle_state_change(self, msg: TagoMessage) -> None:
+        data = msg.content
+        if isinstance(data, dict) and self.PROP_IS_ON in data:
+            self._is_on = bool(data[self.PROP_IS_ON])
+        await super().handle_state_change(msg)
+
+
+class TagoVirtualSensor(TagoEntity):
+    """A read-only virtual binary sensor — flipped by the firmware's
+    automation engine to signal something to HA. PROTOCOL_PROPOSALS §P3.
+
+    `name` is set by the device; `location` is fixed to `"VIRTUAL"`.
+    Write commands (`turn_on`/`turn_off`/`toggle`/`set_config`) are
+    rejected by the firmware with status 500."""
+
+    VIRTUAL_SENSOR = "virtual_sensor"
+    LOCATION_VIRTUAL = "VIRTUAL"
+    types = [VIRTUAL_SENSOR]
+
+    PROP_IS_ON = "is_on"
+    PROP_INDEX = "index"
+
+    def __init__(self, json: dict, device: TagoDevice):
+        super().__init__(json, device)
+        self._is_on: bool = bool(json.get(self.PROP_IS_ON, False))
+        self._index: int = int(json.get(self.PROP_INDEX, 0) or 0)
+
+    @property
+    def is_on(self) -> bool:
+        return self._is_on
+
+    @property
+    def index(self) -> int:
+        return self._index
+
+    async def handle_state_change(self, msg: TagoMessage) -> None:
         data = msg.content
         if isinstance(data, dict) and self.PROP_IS_ON in data:
             self._is_on = bool(data[self.PROP_IS_ON])

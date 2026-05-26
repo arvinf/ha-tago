@@ -20,10 +20,23 @@ from .const import (
     DOMAIN,
     MIN_FIRMWARE_VERSION,
 )
-from .TagoNet import TagoDevice, TagoEntity
+from .TagoNet import TagoDevice, TagoEntity, TagoKeypad, TagoScene
 
 PLATFORMS: list[str] = [Platform.LIGHT, Platform.FAN,
-                        Platform.SWITCH, Platform.COVER, Platform.BUTTON, Platform.BINARY_SENSOR]
+                        Platform.SWITCH, Platform.COVER, Platform.BUTTON,
+                        Platform.BINARY_SENSOR, Platform.SCENE,
+                        Platform.SENSOR]
+
+# Event fired on hass.bus when a key event arrives from a keypad. Used
+# by HA automations to trigger on keypad presses. PROTOCOL_PROPOSALS §P2.4.
+EVENT_TAGO_KEY = "tago_key_event"
+
+# Event fired on hass.bus when a scene is activated on the device by
+# any source (remote `activate`, keypad press, schedule, etc.).
+# PROTOCOL_PROPOSALS §P1.4. Distinct from HA's own scene-domain events
+# (which fire only on `scene.turn_on` from HA) so automations can react
+# to scenes that were triggered by the device itself.
+EVENT_TAGO_SCENE = "tago_scene_activated"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -102,6 +115,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     entry.runtime_data = device
     _async_prune_stale_devices(hass, entry, device)
+    _async_register_keypads_and_dispatch_events(hass, entry, device)
+    _async_register_scene_event_dispatch(hass, device)
 
     # `firmware_rev` arrives via the post-connect `get_config` response
     # (fire-and-forget; see TagoDevice.connection_task). It usually lands
@@ -129,6 +144,68 @@ def _parse_version(v: str | None) -> tuple[int, ...] | None:
         return tuple(int(p) for p in v.split("."))
     except (ValueError, AttributeError):
         return None
+
+
+def _async_register_keypads_and_dispatch_events(
+    hass: HomeAssistant, entry: ConfigEntry, device: TagoDevice
+) -> None:
+    """Register each TagoKeypad as a HA device-registry entry and wire its
+    key events to the HA bus so users can author automations against
+    keypad presses without per-key entities (PROTOCOL_PROPOSALS §P2.6)."""
+    registry = dr.async_get(hass)
+    for kpd in device.entities:
+        if not isinstance(kpd, TagoKeypad):
+            continue
+        registry.async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, kpd.unique_id)},
+            manufacturer=device.manufacturer,
+            model=kpd.model_num,
+            name=kpd.name or f"Keypad {kpd._tag}",
+            suggested_area=kpd.location,
+            via_device=(DOMAIN, device.unique_id),
+        )
+        kpd.set_on_key_event(_make_key_event_dispatcher(hass, kpd))
+
+
+def _make_key_event_dispatcher(hass: HomeAssistant, kpd: TagoKeypad):
+    """Build an async callback for `TagoKeypad.set_on_key_event` that
+    fans the wire event out to hass.bus as `EVENT_TAGO_KEY`."""
+    async def _dispatch(msg) -> None:
+        data = msg.data if isinstance(msg.data, dict) else {}
+        hass.bus.async_fire(EVENT_TAGO_KEY, {
+            "keypad_id": msg.src,
+            "key_id": data.get(TagoKeypad.PROP_KEY_ID),
+            "event": msg.evt,
+            "data": data.get("data"),
+            "duration": data.get("duration"),
+            "led_state": data.get("led_state"),
+            "led_color": data.get("led_color"),
+        })
+    return _dispatch
+
+
+def _async_register_scene_event_dispatch(
+    hass: HomeAssistant, device: TagoDevice
+) -> None:
+    """Wire each TagoScene's activation callback to fire `EVENT_TAGO_SCENE`
+    on HA's bus. Lets automations trigger on device-initiated scene
+    activations (e.g., scene fired from a keypad press) — HA's own
+    scene-domain events only fire when `scene.turn_on` is called from HA."""
+    for scn in device.entities:
+        if isinstance(scn, TagoScene):
+            scn.set_on_scene_activated(_make_scene_event_dispatcher(hass, scn))
+
+
+def _make_scene_event_dispatcher(hass: HomeAssistant, scn: TagoScene):
+    async def _dispatch(msg) -> None:
+        data = msg.data if isinstance(msg.data, dict) else {}
+        hass.bus.async_fire(EVENT_TAGO_SCENE, {
+            "scene_id": msg.src,
+            "name": data.get("name") or scn.name,
+            "ts": data.get("ts"),
+        })
+    return _dispatch
 
 
 def _async_check_firmware_repair(
