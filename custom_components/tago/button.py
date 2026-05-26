@@ -4,7 +4,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .TagoNet import TagoDevice
+from .TagoNet import TagoDevice, TagoGateway
 from . import generate_device_info
 
 PARALLEL_UPDATES = 0
@@ -14,12 +14,14 @@ async def async_setup_entry(
     config_entry: ConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    device = config_entry.runtime_data
-    async_add_entities([
-        RebootButton(device, hass),
-        IdentifyButton(device, hass)
-    ])
-
+    gateway: TagoGateway = config_entry.runtime_data
+    items = []
+    # One reboot + one identify button per TagoDevice — each maps to a
+    # device-specific wire request, not a gateway-wide one.
+    for device in gateway.devices:
+        items.append(RebootButton(device, hass))
+        items.append(IdentifyButton(device, hass))
+    async_add_entities(items)
 
 class RebootButton(ButtonEntity):
     """A button to reboot the device."""

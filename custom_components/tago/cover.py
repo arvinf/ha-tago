@@ -10,7 +10,7 @@ from homeassistant.components.cover import (
 from homeassistant.config_entries import ConfigEntry
 
 from .entity import TagoEntityHA
-from .TagoNet import TagoCover, TagoDevice
+from .TagoNet import TagoCover, TagoGateway
 
 # Single shared WebSocket; no per-platform serialization needed.
 PARALLEL_UPDATES = 0
@@ -72,8 +72,8 @@ class TagoCoverHA(TagoEntityHA, CoverEntity):
 
 async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
     items: list[TagoCoverHA] = list()
-    device : TagoDevice = entry.runtime_data
-    for e in device.entities:
+    gateway: TagoGateway = entry.runtime_data
+    for e in gateway.entities:
         if isinstance(e, TagoCover):
             items.append(TagoCoverHA(e))
 

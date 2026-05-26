@@ -112,12 +112,12 @@ async def test_invalid_message_in_stream_does_not_hang(
 async def test_message_routed_to_matching_entity_only() -> None:
     class TrackingEntity(TagoEntity):
         def __init__(self, payload: dict, device: TagoDevice):
-            super().__init__(payload, device)
             self.count = 0
+            super().__init__(payload, device)
 
-        async def handle_state_change(self, msg: TagoMessage) -> None:
+        def handle_state_change(self, data: dict) -> None:
             self.count += 1
-            await super().handle_state_change(msg)
+            super().handle_state_change(data)
 
     device = TagoDevice("dummy:1", authkey="k")
     e1 = TrackingEntity(
@@ -128,6 +128,11 @@ async def test_message_routed_to_matching_entity_only() -> None:
         {"id": "e2", "type": "unknown_type", "name": "B", "location": "Y"},
         device,
     )
+    # Discovery payload feeds through handle_state_change at construction
+    # time now, so each entity has already counted once. Reset before
+    # asserting routing behaviour.
+    e1.count = 0
+    e2.count = 0
 
     msg = TagoMessage.from_payload(_event_payload("e1", TagoEntity.EVT_STATE_CHANGED))
 
@@ -319,7 +324,11 @@ async def test_entities_toggle_online_offline_and_back_online(monkeypatch, login
 
 
 @pytest.mark.asyncio
-async def test_reconnect_with_topology_addition_does_not_duplicate_existing(monkeypatch, login_ok_payload) -> None:
+async def test_reconnect_keeps_topology_frozen_when_device_adds_entities(monkeypatch, login_ok_payload) -> None:
+    """Per D7 (config frozen) the host re-reads `list_nodes` only on the
+    initial connect within a TagoDevice lifetime. If the device's reported
+    entity set grows during a reconnect, the host does **not** pick up
+    the new entities until the integration is reloaded."""
     first_nodes = _nodes_payload(
         [
             {"id": "light-1", "type": "light_dimmable", "name": "Kitchen", "location": "Kitchen", "tag": "L1"},
@@ -374,8 +383,9 @@ async def test_reconnect_with_topology_addition_does_not_duplicate_existing(monk
     await device.connect(timeout=1.0)
     await device.disconnect(timeout=5.0)
 
+    # Topology unchanged on reconnect — `fan-1` is ignored until reload.
     final_ids = [e.unique_id for e in device.entities]
-    assert set(final_ids) == {"light-1", "switch-1", "fan-1"}
+    assert set(final_ids) == {"light-1", "switch-1"}
     assert final_ids.count("light-1") == 1
     assert final_ids.count("switch-1") == 1
 
@@ -452,7 +462,11 @@ async def test_malformed_message_flood_does_not_hang_disconnect(patch_wsconnect,
 
 
 @pytest.mark.asyncio
-async def test_reconnect_with_topology_removal_drops_missing_entities(monkeypatch, login_ok_payload) -> None:
+async def test_reconnect_keeps_topology_frozen_when_device_drops_entities(monkeypatch, login_ok_payload) -> None:
+    """Mirror of the addition case (D7): if the device drops an entity
+    from its reported list on reconnect, the host retains the original
+    entity (and the entity simply goes unavailable when the connection
+    dies). Surfaces only after an integration reload."""
     first_nodes = _nodes_payload(
         [
             {"id": "light-1", "type": "light_dimmable", "name": "Kitchen", "location": "Kitchen", "tag": "L1"},
@@ -494,11 +508,16 @@ async def test_reconnect_with_topology_removal_drops_missing_entities(monkeypatc
 
     await device.connect(timeout=1.0)
     await device.disconnect(timeout=5.0)
-    assert {e.unique_id for e in device.entities} == {"light-1"}
+    # `switch-1` is retained even though the second `list_nodes` would
+    # have omitted it — config is frozen for the device's lifetime.
+    assert {e.unique_id for e in device.entities} == {"light-1", "switch-1"}
 
 
 @pytest.mark.asyncio
-async def test_reconnect_with_type_change_replaces_entity_class(monkeypatch, login_ok_payload) -> None:
+async def test_reconnect_keeps_entity_class_frozen_across_type_change(monkeypatch, login_ok_payload) -> None:
+    """A device-side type change is a config change (D7) — it doesn't
+    re-classify the entity on the host. The original Python class is
+    retained until the integration is reloaded."""
     first_nodes = _nodes_payload(
         [{"id": "load-1", "type": "outlet_onoff", "name": "Load", "location": "Area", "tag": "A1"}]
     )
@@ -535,4 +554,6 @@ async def test_reconnect_with_type_change_replaces_entity_class(monkeypatch, log
 
     await device.connect(timeout=1.0)
     await device.disconnect(timeout=5.0)
-    assert isinstance(device.entities[0], TagoFan)
+    # Still a TagoSwitch — the new type in the second `list_nodes`
+    # response is not applied within this TagoDevice lifetime.
+    assert isinstance(device.entities[0], TagoSwitch)

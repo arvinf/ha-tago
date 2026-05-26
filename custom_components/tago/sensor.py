@@ -20,7 +20,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import DOMAIN
 from .entity import TagoEntityHA
-from .TagoNet import TagoDevice, TagoEntity
+from .TagoNet import TagoEntity, TagoGateway
 
 PARALLEL_UPDATES = 0
 
@@ -30,9 +30,9 @@ async def async_setup_entry(
     config_entry: ConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    device: TagoDevice = config_entry.runtime_data
+    gateway: TagoGateway = config_entry.runtime_data
     items: list[SensorEntity] = []
-    for e in device.entities:
+    for e in gateway.entities:
         # PROTOCOL_PROPOSALS §P6: only entities with a reported `rsi`
         # get a signal-strength companion sensor. An entity that
         # reports rsi=None has no wireless link to measure.
@@ -72,11 +72,8 @@ class SignalStrengthSensor(TagoEntityHA, SensorEntity):
 
     @property
     def device_info(self) -> DeviceInfo | None:
-        # For a keypad LED the parent device-registry card is the
-        # keypad's, not the LED's. Mirror that nesting so the signal
-        # strength sensor sits next to the LED light entity on the
-        # keypad card rather than spawning a sibling entry.
-        keypad_id = getattr(self._entity, "keypad_id", None)
-        if keypad_id:
-            return DeviceInfo(identifiers={(DOMAIN, keypad_id)})
+        # For keypads the integration registers the device card up
+        # front (see __init__._async_register_keypads_and_dispatch_events);
+        # this sensor's `identifiers` already match that card, so HA
+        # merges them onto a single entry rather than creating a sibling.
         return super().device_info

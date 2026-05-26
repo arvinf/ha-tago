@@ -11,7 +11,7 @@ from homeassistant import config_entries
 from homeassistant.components import zeroconf
 from homeassistant.data_entry_flow import FlowResult
 
-from .TagoNet import TagoDevice
+from .TagoNet import TagoGateway
 
 from .const import (
     CONF_AUTHKEY,
@@ -119,22 +119,26 @@ class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             new_host = user_input[CONF_HOSTSTR].strip()
             new_pin = user_input.get(CONF_PIN, "").strip()
             self.errors = {}
-            device: TagoDevice | None = None
+            gateway: TagoGateway | None = None
             try:
-                device = TagoDevice(new_host, new_pin)
-                await device.connect(timeout=5.0)
-                # Same device? Unique-id must still match — otherwise the
-                # user has pointed at a different physical Tago.
-                if entry.unique_id and device.serial_num != entry.unique_id:
+                gateway = TagoGateway(new_host, new_pin)
+                await gateway.connect(timeout=5.0)
+                # Same gateway? The entry's unique_id was set from the first
+                # device's serial when the entry was created; verify it's
+                # still present so the user can't repoint at a different
+                # physical Tago and overwrite the entry by mistake.
+                primary = gateway.devices[0] if gateway.devices else None
+                primary_serial = primary.serial_num if primary else None
+                if entry.unique_id and primary_serial != entry.unique_id:
                     return self.async_abort(reason="wrong_device")
             except PermissionError:
                 self.errors["base"] = "invalid_auth"
             except (ConnectionError, OSError, TimeoutError, asyncio.TimeoutError):
                 self.errors["base"] = "cannot_connect"
             finally:
-                if device is not None:
+                if gateway is not None:
                     try:
-                        await device.disconnect(timeout=3.0)
+                        await gateway.disconnect(timeout=3.0)
                     except Exception as err:
                         _LOGGER.debug("Connection cleanup failed: %s", err)
 
@@ -184,18 +188,18 @@ class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self.pin = user_input.get(CONF_PIN, "").strip()
             self.errors = {}
-            device: TagoDevice | None = None
+            gateway: TagoGateway | None = None
             try:
-                device = TagoDevice(self.hoststr, self.pin)
-                await device.connect(timeout=5.0)
+                gateway = TagoGateway(self.hoststr, self.pin)
+                await gateway.connect(timeout=5.0)
             except PermissionError:
                 self.errors["base"] = "invalid_auth"
             except (ConnectionError, OSError, TimeoutError, asyncio.TimeoutError):
                 self.errors["base"] = "cannot_connect"
             finally:
-                if device is not None:
+                if gateway is not None:
                     try:
-                        await device.disconnect(timeout=3.0)
+                        await gateway.disconnect(timeout=3.0)
                     except Exception as err:
                         _LOGGER.debug("Connection cleanup failed: %s", err)
 
@@ -219,14 +223,21 @@ class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_test_connection(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Test the connection to the device."""
+        """Test the connection to the gateway."""
         self.errors = {}
-        device: TagoDevice | None = None
+        gateway: TagoGateway | None = None
+        primary_serial: str | None = None
+        primary_model: str | None = None
+        primary_id: str | None = None
 
         try:
-            device = TagoDevice(self.hoststr, self.pin)
-            await device.connect(timeout=5.0)
-            device_id = device.unique_id
+            gateway = TagoGateway(self.hoststr, self.pin)
+            await gateway.connect(timeout=5.0)
+            primary = gateway.devices[0] if gateway.devices else None
+            if primary is not None:
+                primary_serial = primary.serial_num
+                primary_model = primary.model_num
+                primary_id = primary.unique_id
 
         except PermissionError as e:
             _LOGGER.debug("Authentication failed: %s", str(e))
@@ -243,21 +254,31 @@ class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_zeroconf_confirm()
             return await self.async_step_user()
         finally:
-            if device is not None:
+            if gateway is not None:
                 try:
-                    await device.disconnect(timeout=3.0)
+                    await gateway.disconnect(timeout=3.0)
                 except Exception as err:
                     _LOGGER.debug("Connection cleanup failed: %s", err)
 
-        await self.async_set_unique_id(device.serial_num)
+        # Use the first device's serial as the entry's unique_id so the
+        # value is stable across HA reloads (matches the pre-gateway
+        # semantics when there was only one device). Fall back to the
+        # hoststr if no devices reported back.
+        unique_id = primary_serial or self.hoststr
+        await self.async_set_unique_id(unique_id)
         self._abort_if_unique_id_configured()
 
-        _LOGGER.debug("Successfully connected to Tago device %s", device.serial_num)
+        title = (
+            f'{primary_model} {primary_serial}'
+            if primary_model and primary_serial
+            else f'TAGO Gateway @ {self.hoststr}'
+        )
+        _LOGGER.debug("Successfully connected to Tago gateway %s", self.hoststr)
         return self.async_create_entry(
-            title=f'{device.model_num} {device.serial_num}',
+            title=title,
             data={
                 CONF_PIN: self.pin,
-                CONF_DEVICENAME: device_id,
+                CONF_DEVICENAME: primary_id or self.hoststr,
                 CONF_HOSTSTR: self.hoststr,
             },
         )

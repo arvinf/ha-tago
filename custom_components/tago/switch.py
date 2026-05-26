@@ -6,7 +6,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity import EntityCategory
 
 from .entity import TagoEntityHA
-from .TagoNet import TagoDevice, TagoSwitch, TagoVirtualSwitch
+from .TagoNet import TagoGateway, TagoSwitch, TagoVirtualSwitch
 
 # Single shared WebSocket; no per-platform serialization needed.
 PARALLEL_UPDATES = 0
@@ -56,8 +56,8 @@ class TagoVirtualSwitchHA(TagoEntityHA, SwitchEntity):
 
 async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
     items: list[SwitchEntity] = []
-    device: TagoDevice = entry.runtime_data
-    for e in device.entities:
+    gateway: TagoGateway = entry.runtime_data
+    for e in gateway.entities:
         if isinstance(e, TagoSwitch):
             items.append(TagoSwitchHA(e))
         elif isinstance(e, TagoVirtualSwitch):

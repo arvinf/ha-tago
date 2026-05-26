@@ -7,7 +7,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from .const import DOMAIN
 
 from .entity import TagoEntityHA
-from .TagoNet import TagoDevice, TagoSensor, TagoVirtualSensor
+from .TagoNet import TagoDevice, TagoGateway, TagoSensor, TagoVirtualSensor
 from . import generate_device_info
 
 PARALLEL_UPDATES = 0
@@ -32,12 +32,14 @@ async def async_setup_entry(
     config_entry: ConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    device: TagoDevice = config_entry.runtime_data
-    items: list[BinarySensorEntity] = [
-        OfflineSensor(device, hass),
-        FirmwareUpdateAvailableSensor(device),
-    ]
-    for e in device.entities:
+    gateway: TagoGateway = config_entry.runtime_data
+    items: list[BinarySensorEntity] = []
+    # One offline + one firmware-update sensor per TagoDevice — both
+    # track per-device state, not gateway-wide.
+    for device in gateway.devices:
+        items.append(OfflineSensor(device, hass))
+        items.append(FirmwareUpdateAvailableSensor(device))
+    for e in gateway.entities:
         if isinstance(e, TagoVirtualSensor):
             items.append(TagoVirtualSensorHA(e))
         elif isinstance(e, TagoSensor):
@@ -74,15 +76,15 @@ class OfflineSensor(BinarySensorEntity):
 class FirmwareUpdateAvailableSensor(BinarySensorEntity):
     """Indicates whether the device firmware has a newer release available.
 
-    Per PROTOCOL_PROPOSALS §P5 the device reports `latest_firmware_rev`
-    alongside `firmware_rev` on its `get_config` response (and again via
-    `config_changed`). HA exposes this as a diagnostic-category binary
-    sensor with device class `UPDATE` on the gateway device card.
+    Per PROTOCOL_PROPOSALS §P5.3 the device emits a
+    `firmware_update_available` event carrying the new revision when
+    it discovers an update. HA exposes this as a diagnostic-category
+    binary sensor with device class `UPDATE` on the device card.
 
-    The actual firmware update is not performed through HA — the user
-    triggers it via the device's web UI or native OTA mechanism, and
-    the sensor flips off the next time the device reports a fresh
-    `firmware_rev`."""
+    The actual update is not performed through HA — the user triggers
+    it via the device's web UI or native OTA mechanism. The sensor
+    starts OFF on each connect; the event flips it ON. Reload (or
+    reconnect after the OTA reboot) clears it."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_device_class = BinarySensorDeviceClass.UPDATE

@@ -600,8 +600,8 @@ async def test_tagoentity_handle_message_routes_get_config_response_to_config_ch
     )
     called: list[str] = []
 
-    async def _track_config_change(msg):
-        called.append(msg.rsp)
+    def _track_config_change(data):
+        called.append("get_config")
 
     entity.handle_config_change = _track_config_change
 
