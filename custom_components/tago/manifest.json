@@ -7,6 +7,6 @@
   "requirements": [],
   "zeroconf": ["_tagodev._tcp.local."],
   "homekit": {},
-  "codeowners": [""],
+  "codeowners": ["@tago/ha"],
   "iot_class": "local_push"
 }

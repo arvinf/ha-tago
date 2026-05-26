@@ -1,0 +1,430 @@
+{
+  "_doc": "Wire-level scenario fixtures shared by firmware host-side tests and by the HomeAssistant integration / dashboard client tests. Format described in CLIENT_TEST_GUIDE.md §4. Add new scenarios at the bottom; do not reorder existing ones (test IDs reference them by key).",
+
+  "_conventions": {
+    "device_id": "TAGO_TEST_001",
+    "group_id":  "TAGO_TEST_001L1",
+    "load0":     "TAGO_TEST_001L1_0",
+    "load1":     "TAGO_TEST_001L1_1",
+    "notes": "All scenarios start from a clean state unless setup says otherwise. expect_response matches structurally — additional keys allowed unless an explicit null asserts absence. expect_events is ordered."
+  },
+
+  "connect_identity_exchange": {
+    "doc": "Server replies to the first frame with identity + nonce.",
+    "steps": [
+      {
+        "send": { "any": "first-frame" },
+        "expect_response": {
+          "status": 200,
+          "serialnum": "TAGO_TEST_001",
+          "model": "dimac8",
+          "id": "TAGO_TEST_001"
+        }
+      }
+    ]
+  },
+
+  "ping_basic": {
+    "doc": "ping with no dst returns ts. dst defaults to the device gateway.",
+    "steps": [
+      {
+        "send": { "req": "ping" },
+        "expect_response": {
+          "rsp": "ping",
+          "src": "TAGO_TEST_001",
+          "ts_type": "number"
+        }
+      }
+    ]
+  },
+
+  "ping_with_ref": {
+    "doc": "ref round-trips on every response.",
+    "steps": [
+      {
+        "send": { "req": "ping", "ref": "abc-123" },
+        "expect_response": { "rsp": "ping", "ref": "abc-123" }
+      }
+    ]
+  },
+
+  "list_nodes_basic": {
+    "doc": "list_nodes returns a single loads-group with 8 channels.",
+    "steps": [
+      {
+        "send": { "req": "list_nodes" },
+        "expect_response": {
+          "rsp": "list_nodes",
+          "src": "TAGO_TEST_001",
+          "nodes": { "TAGO_TEST_001L1": { "type": "dimac", "ch": 8 } }
+        }
+      }
+    ]
+  },
+
+  "device_get_config_basic": {
+    "doc": "Device-level get_config exposes firmware_rev / model_num / serial / api_key / loads array.",
+    "steps": [
+      {
+        "send": { "req": "get_config" },
+        "expect_response": {
+          "rsp": "get_config",
+          "src": "TAGO_TEST_001",
+          "firmware_rev_present": true,
+          "model_num": "dimac8",
+          "serial_number": "TAGO_TEST_001",
+          "loads": ["TAGO_TEST_001L1"]
+        }
+      }
+    ]
+  },
+
+  "turn_on_onoff": {
+    "doc": "turn_on on an on/off entity sets is_on=true (per protocol; firmware F1/F6 today).",
+    "setup": {
+      "TAGO_TEST_001L1_0": { "type": "light_onoff", "is_on": false }
+    },
+    "steps": [
+      {
+        "send": { "req": "turn_on", "dst": "TAGO_TEST_001L1_0" },
+        "expect_response": { "status": 200, "rsp": "turn_on", "src": "TAGO_TEST_001L1_0" },
+        "expect_events": [
+          { "evt": "state_changed", "src": "TAGO_TEST_001L1_0", "is_on": true }
+        ]
+      },
+      {
+        "send": { "req": "get_state", "dst": "TAGO_TEST_001L1_0" },
+        "expect_response": { "is_on": true }
+      }
+    ],
+    "final_state": { "TAGO_TEST_001L1_0": { "is_on": true } }
+  },
+
+  "turn_off_onoff": {
+    "doc": "turn_off returns is_on=false.",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_onoff", "is_on": true } },
+    "steps": [
+      {
+        "send": { "req": "turn_off", "dst": "TAGO_TEST_001L1_0" },
+        "expect_response": { "status": 200 },
+        "expect_events": [
+          { "evt": "state_changed", "src": "TAGO_TEST_001L1_0", "is_on": false }
+        ]
+      }
+    ]
+  },
+
+  "toggle_onoff": {
+    "doc": "Two toggles return the entity to its starting state.",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_onoff", "is_on": false } },
+    "steps": [
+      { "send": { "req": "toggle", "dst": "TAGO_TEST_001L1_0" }, "expect_response": { "status": 200 } },
+      { "send": { "req": "get_state", "dst": "TAGO_TEST_001L1_0" }, "expect_response": { "is_on": true } },
+      { "send": { "req": "toggle", "dst": "TAGO_TEST_001L1_0" }, "expect_response": { "status": 200 } },
+      { "send": { "req": "get_state", "dst": "TAGO_TEST_001L1_0" }, "expect_response": { "is_on": false } }
+    ]
+  },
+
+  "set_brightness_500": {
+    "doc": "set_light brightness=500 with no duration applies immediately.",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_dimmable", "brightness": 0 } },
+    "steps": [
+      {
+        "send": { "req": "set_light", "dst": "TAGO_TEST_001L1_0", "brightness": 500 },
+        "expect_response": { "status": 200 },
+        "expect_events": [
+          { "evt": "state_changed", "src": "TAGO_TEST_001L1_0", "brightness": 500, "ramp": null }
+        ]
+      }
+    ],
+    "final_state": { "TAGO_TEST_001L1_0": { "brightness": 500 } }
+  },
+
+  "set_brightness_0": {
+    "doc": "set_light brightness=0 turns the light off.",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_dimmable", "brightness": 700 } },
+    "steps": [
+      {
+        "send": { "req": "set_light", "dst": "TAGO_TEST_001L1_0", "brightness": 0 },
+        "expect_response": { "status": 200 }
+      }
+    ],
+    "final_state": { "TAGO_TEST_001L1_0": { "brightness": 0 } }
+  },
+
+  "set_brightness_clamped_high": {
+    "doc": "brightness > 1000 is clamped to 1000.",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_dimmable", "brightness": 0 } },
+    "steps": [
+      {
+        "send": { "req": "set_light", "dst": "TAGO_TEST_001L1_0", "brightness": 1500 },
+        "expect_response": { "status": 200 }
+      }
+    ],
+    "final_state": { "TAGO_TEST_001L1_0": { "brightness": 1000 } }
+  },
+
+  "set_brightness_clamped_negative": {
+    "doc": "negative brightness clamps to 0.",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_dimmable", "brightness": 500 } },
+    "steps": [
+      {
+        "send": { "req": "set_light", "dst": "TAGO_TEST_001L1_0", "brightness": -100 },
+        "expect_response": { "status": 200 }
+      }
+    ],
+    "final_state": { "TAGO_TEST_001L1_0": { "brightness": 0 } }
+  },
+
+  "brightness_plus_delta": {
+    "doc": "brightness+ adds to the current live value.",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_dimmable", "brightness": 400 } },
+    "steps": [
+      {
+        "send": { "req": "set_light", "dst": "TAGO_TEST_001L1_0", "brightness+": 100 },
+        "expect_response": { "status": 200 }
+      }
+    ],
+    "final_state": { "TAGO_TEST_001L1_0": { "brightness": 500 } }
+  },
+
+  "ramp_brightness_1s": {
+    "doc": "set_light with duration emits state_changed-with-ramp immediately, then state_changed-without-ramp on completion.",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_dimmable", "brightness": 0 } },
+    "steps": [
+      {
+        "send": { "req": "set_light", "dst": "TAGO_TEST_001L1_0", "brightness": 800, "duration": 1000 },
+        "expect_response": { "status": 200 },
+        "expect_events": [
+          {
+            "evt": "state_changed",
+            "src": "TAGO_TEST_001L1_0",
+            "ramp": { "duration": 1000, "end": { "brightness": 800 } }
+          }
+        ]
+      },
+      {
+        "advance_ms": 1100,
+        "expect_events": [
+          { "evt": "state_changed", "src": "TAGO_TEST_001L1_0", "brightness": 800, "ramp": null }
+        ]
+      }
+    ],
+    "final_state": { "TAGO_TEST_001L1_0": { "brightness": 800 } }
+  },
+
+  "ramp_duration_below_min_is_instant": {
+    "doc": "duration < CONFIG_RAMP_DURATION_MIN (300ms) is applied instantly with no ramp object.",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_dimmable", "brightness": 0 } },
+    "steps": [
+      {
+        "send": { "req": "set_light", "dst": "TAGO_TEST_001L1_0", "brightness": 500, "duration": 100 },
+        "expect_response": { "status": 200 },
+        "expect_events": [
+          { "evt": "state_changed", "src": "TAGO_TEST_001L1_0", "brightness": 500, "ramp": null }
+        ]
+      }
+    ]
+  },
+
+  "ramp_duration_above_max_clamps": {
+    "doc": "duration > CONFIG_RAMP_DURATION_MAX (10000ms) is clamped to 10000.",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_dimmable", "brightness": 0 } },
+    "steps": [
+      {
+        "send": { "req": "set_light", "dst": "TAGO_TEST_001L1_0", "brightness": 500, "duration": 99999 },
+        "expect_response": { "status": 200 },
+        "expect_events": [
+          {
+            "evt": "state_changed",
+            "src": "TAGO_TEST_001L1_0",
+            "ramp": { "duration": 10000 }
+          }
+        ]
+      }
+    ]
+  },
+
+  "stop_ramp_mid": {
+    "doc": "stop_ramp during a ramp freezes brightness at the current value. PROTOCOL.md §13.8 says state_changed fires on next tick; firmware F2 does not emit it today.",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_dimmable", "brightness": 0 } },
+    "steps": [
+      {
+        "send": { "req": "set_light", "dst": "TAGO_TEST_001L1_0", "brightness": 1000, "duration": 2000 },
+        "expect_response": { "status": 200 }
+      },
+      { "advance_ms": 1000 },
+      {
+        "send": { "req": "stop_ramp", "dst": "TAGO_TEST_001L1_0" },
+        "expect_response": { "status": 200 },
+        "expect_events_protocol": [
+          { "evt": "state_changed", "src": "TAGO_TEST_001L1_0", "brightness_about": 500, "ramp": null }
+        ],
+        "expect_events_firmware_today": []
+      }
+    ]
+  },
+
+  "set_ct_50pct": {
+    "doc": "set_light ct=500 on a CCT-capable light sets ct to 50% mix.",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_ww", "brightness": 500, "ct": 0 } },
+    "steps": [
+      {
+        "send": { "req": "set_light", "dst": "TAGO_TEST_001L1_0", "ct": 500 },
+        "expect_response": { "status": 200 }
+      }
+    ],
+    "final_state": { "TAGO_TEST_001L1_0": { "ct": 500 } },
+    "firmware_note": "Until F3 is fixed, 'light_ww' is rejected by set_config so this scenario only runs against a future firmware or a permissive fake server."
+  },
+
+  "ct_plus_delta": {
+    "doc": "ct+ delta and clears any x/y to 0.",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_ww", "brightness": 500, "ct": 400 } },
+    "steps": [
+      {
+        "send": { "req": "set_light", "dst": "TAGO_TEST_001L1_0", "ct+": 100 },
+        "expect_response": { "status": 200 }
+      }
+    ],
+    "final_state": { "TAGO_TEST_001L1_0": { "ct": 500, "x": 0, "y": 0 } }
+  },
+
+  "set_color_red": {
+    "doc": "set_light x/y on a color-capable light.",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_rgb", "brightness": 800 } },
+    "steps": [
+      {
+        "send": { "req": "set_light", "dst": "TAGO_TEST_001L1_0", "x": 0.64, "y": 0.33 },
+        "expect_response": { "status": 200 }
+      }
+    ],
+    "firmware_note": "F3: light_rgb rejected by set_config today."
+  },
+
+  "set_color_x_only_rejected": {
+    "doc": "x without y is rejected.",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_rgb" } },
+    "steps": [
+      {
+        "send": { "req": "set_light", "dst": "TAGO_TEST_001L1_0", "x": 0.30 },
+        "expect_response": { "status": 500 }
+      }
+    ],
+    "firmware_note": "F3: light_rgb rejected by set_config today, so this is observable only against a permissive fake."
+  },
+
+  "set_light_noop_drops_event": {
+    "doc": "Setting brightness to the current end target with no duration emits no event (PROTOCOL.md §13.7 §17.1).",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_dimmable", "brightness": 500 } },
+    "steps": [
+      {
+        "send": { "req": "set_light", "dst": "TAGO_TEST_001L1_0", "brightness": 500 },
+        "expect_response": { "status": 200 },
+        "expect_events": []
+      }
+    ]
+  },
+
+  "set_config_rename": {
+    "doc": "set_config can rename a load. Emits config_changed.",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_onoff", "name": "" } },
+    "steps": [
+      {
+        "send": { "req": "set_config", "dst": "TAGO_TEST_001L1_0", "name": "Kitchen" },
+        "expect_response": { "status": 200 },
+        "expect_events": [
+          { "evt": "config_changed", "src": "TAGO_TEST_001L1_0", "name": "Kitchen" }
+        ]
+      }
+    ]
+  },
+
+  "set_config_invalid_type_rejected": {
+    "doc": "Unknown type is rejected with status 500. No events emitted.",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_onoff" } },
+    "steps": [
+      {
+        "send": { "req": "set_config", "dst": "TAGO_TEST_001L1_0", "type": "toaster" },
+        "expect_response": { "status": 500 },
+        "expect_events": []
+      }
+    ]
+  },
+
+  "set_config_steals_output": {
+    "doc": "Reassigning an output already owned by another load emits config_changed for both loads.",
+    "setup": {
+      "TAGO_TEST_001L1_0": { "type": "light_onoff", "map": [0] },
+      "TAGO_TEST_001L1_1": { "type": "light_onoff", "map": [-1] }
+    },
+    "steps": [
+      {
+        "send": { "req": "set_config", "dst": "TAGO_TEST_001L1_1", "type": "light_onoff", "map": [0] },
+        "expect_response": { "status": 200 },
+        "expect_events_unordered": [
+          { "evt": "config_changed", "src": "TAGO_TEST_001L1_0" },
+          { "evt": "config_changed", "src": "TAGO_TEST_001L1_1" }
+        ]
+      }
+    ],
+    "final_state": {
+      "TAGO_TEST_001L1_0": { "map": [-1] },
+      "TAGO_TEST_001L1_1": { "map": [0] }
+    }
+  },
+
+  "unknown_request_500": {
+    "doc": "Unknown req returns 500. rsp echoes the unknown name.",
+    "steps": [
+      {
+        "send": { "req": "does_not_exist" },
+        "expect_response": { "status": 500, "rsp": "does_not_exist" }
+      }
+    ]
+  },
+
+  "bad_dst_500": {
+    "doc": "dst that doesn't match any entity returns 500.",
+    "steps": [
+      {
+        "send": { "req": "get_state", "dst": "NO_SUCH_ENTITY" },
+        "expect_response": { "status": 500, "src": "NO_SUCH_ENTITY" }
+      }
+    ]
+  },
+
+  "non_string_dst_500": {
+    "doc": "dst as a non-string returns 500 with no further validation.",
+    "steps": [
+      {
+        "send_raw": "{\"req\":\"ping\",\"dst\":42}",
+        "expect_response": { "status": 500 }
+      }
+    ]
+  },
+
+  "ping_detects_reboot": {
+    "doc": "ts decreases (or resets to a small number) after a simulated reboot. Two pings around a reboot show this.",
+    "steps": [
+      {
+        "send": { "req": "ping" },
+        "expect_response": { "rsp": "ping", "ts_type": "number" }
+      },
+      { "simulate_reboot": true },
+      {
+        "send": { "req": "ping" },
+        "expect_response": { "rsp": "ping", "ts_type": "number", "ts_less_than_previous": true }
+      }
+    ]
+  },
+
+  "external_state_change_broadcast": {
+    "doc": "A physical switch flip on the device emits a state_changed broadcast that the dashboard must process even though it sent no command.",
+    "setup": { "TAGO_TEST_001L1_0": { "type": "light_onoff", "is_on": false } },
+    "steps": [
+      { "inject_event": { "evt": "state_changed", "src": "TAGO_TEST_001L1_0", "is_on": true } }
+    ],
+    "client_assertion": "Client UI must show entity 0 as on without having sent any command."
+  }
+}

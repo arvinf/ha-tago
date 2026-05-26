@@ -19,6 +19,11 @@ from .const import ATTR_RATE
 from .entity import TagoEntityHA
 from .TagoNet import TagoDevice, TagoLight
 
+# Commands and state echoes share a single WebSocket whose writes are
+# serialized internally; entity updates can fan out without per-platform
+# rate limiting. (Silver tier rule `parallel-updates`.)
+PARALLEL_UPDATES = 0
+
 class TagoLightHA(TagoEntityHA, LightEntity):
     _attr_supported_color_modes = [ColorMode.XY, ColorMode.COLOR_TEMP]
     _attr_supported_features = LightEntityFeature.TRANSITION | LightEntityFeature.FLASH

@@ -1,0 +1,17 @@
+# Test dependencies for the Tago integration.
+#
+# Versions are pinned to the floor of what's currently used in dev
+# (/home/arvinf/core/.venv as of 2026-05). Bump these together with the
+# integration's tested HA version to stay aligned with the matching
+# pytest-homeassistant-custom-component release.
+homeassistant==2026.5.3
+pytest-homeassistant-custom-component==0.13.332
+
+# Direct test deps. `pytest-homeassistant-custom-component` pulls most of
+# these transitively, but pinning them here keeps CI deterministic.
+pytest==9.0.3
+pytest-asyncio==1.3.0
+pytest-cov==7.1.0
+pytest-socket==0.7.0
+syrupy==5.1.0
+websockets==16.0

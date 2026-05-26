@@ -256,13 +256,13 @@ async def test_entities_toggle_online_offline_and_back_online(monkeypatch, login
     first_nodes = _nodes_payload(
         [
             {"id": "light-1", "type": "light_dimmable", "name": "Kitchen", "location": "Kitchen", "tag": "L1"},
-            {"id": "switch-1", "type": "relay_switch", "name": "Pump", "location": "Plant", "tag": "S1"},
+            {"id": "switch-1", "type": "outlet_onoff", "name": "Pump", "location": "Plant", "tag": "S1"},
         ]
     )
     second_nodes = _nodes_payload(
         [
             {"id": "light-1", "type": "light_dimmable", "name": "Kitchen", "location": "Kitchen", "tag": "L1"},
-            {"id": "switch-1", "type": "relay_switch", "name": "Pump", "location": "Plant", "tag": "S1"},
+            {"id": "switch-1", "type": "outlet_onoff", "name": "Pump", "location": "Plant", "tag": "S1"},
         ]
     )
 
@@ -323,13 +323,13 @@ async def test_reconnect_with_topology_addition_does_not_duplicate_existing(monk
     first_nodes = _nodes_payload(
         [
             {"id": "light-1", "type": "light_dimmable", "name": "Kitchen", "location": "Kitchen", "tag": "L1"},
-            {"id": "switch-1", "type": "relay_switch", "name": "Pump", "location": "Plant", "tag": "S1"},
+            {"id": "switch-1", "type": "outlet_onoff", "name": "Pump", "location": "Plant", "tag": "S1"},
         ]
     )
     second_nodes = _nodes_payload(
         [
             {"id": "light-1", "type": "light_dimmable", "name": "Kitchen", "location": "Kitchen", "tag": "L1"},
-            {"id": "switch-1", "type": "relay_switch", "name": "Pump", "location": "Plant", "tag": "S1"},
+            {"id": "switch-1", "type": "outlet_onoff", "name": "Pump", "location": "Plant", "tag": "S1"},
             {"id": "fan-1", "type": "fan_onoff", "name": "Ceiling", "location": "Bedroom", "tag": "F1"},
         ]
     )
@@ -456,7 +456,7 @@ async def test_reconnect_with_topology_removal_drops_missing_entities(monkeypatc
     first_nodes = _nodes_payload(
         [
             {"id": "light-1", "type": "light_dimmable", "name": "Kitchen", "location": "Kitchen", "tag": "L1"},
-            {"id": "switch-1", "type": "relay_switch", "name": "Pump", "location": "Plant", "tag": "S1"},
+            {"id": "switch-1", "type": "outlet_onoff", "name": "Pump", "location": "Plant", "tag": "S1"},
         ]
     )
     second_nodes = _nodes_payload(
@@ -500,7 +500,7 @@ async def test_reconnect_with_topology_removal_drops_missing_entities(monkeypatc
 @pytest.mark.asyncio
 async def test_reconnect_with_type_change_replaces_entity_class(monkeypatch, login_ok_payload) -> None:
     first_nodes = _nodes_payload(
-        [{"id": "load-1", "type": "relay_switch", "name": "Load", "location": "Area", "tag": "A1"}]
+        [{"id": "load-1", "type": "outlet_onoff", "name": "Load", "location": "Area", "tag": "A1"}]
     )
     second_nodes = _nodes_payload(
         [{"id": "load-1", "type": "fan_onoff", "name": "Load", "location": "Area", "tag": "A1"}]

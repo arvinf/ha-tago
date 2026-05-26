@@ -30,11 +30,11 @@ async def test_platform_setup_creates_expected_ha_entity_types() -> None:
         device,
     )
     cover = TagoCover(
-        {"id": "c1", "type": "cover_shades", "name": "Cover", "location": "Office", "tag": "C"},
+        {"id": "c1", "type": "cover_blind", "name": "Cover", "location": "Office", "tag": "C"},
         device,
     )
     switch = TagoSwitch(
-        {"id": "s1", "type": "relay_switch", "name": "Switch", "location": "Plant", "tag": "S"},
+        {"id": "s1", "type": "outlet_onoff", "name": "Switch", "location": "Plant", "tag": "S"},
         device,
     )
 

@@ -84,9 +84,10 @@ async def test_authenticate_legacy_allows_missing_identity_fields() -> None:
     device = TagoDevice("fake.local:1", authkey="k")
 
     login_data = await device._authenticate_legacy(ws)
+    # PROTOCOL.md §2: identity envelope carries serialnum/model/id (no `firmware`).
     assert login_data["serialnum"] is None
     assert login_data["model"] is None
-    assert login_data["firmware"] is None
+    assert login_data["id"] is None
 
 
 def test_startup_signal_set_once() -> None:
@@ -184,7 +185,7 @@ async def test_out_of_order_events_before_list_nodes_ignored(patch_wsconnect, lo
             iter_messages=[
                 json.dumps({"src": "unknown", "evt": "state_changed", "state": "ON"}),
                 json.dumps({"src": "unknown", "evt": "config_changed"}),
-                _nodes([{"id": "switch-1", "type": "relay_switch", "name": "S", "location": "A", "tag": "S1"}]),
+                _nodes([{"id": "switch-1", "type": "outlet_onoff", "name": "S", "location": "A", "tag": "S1"}]),
             ],
             headers={"x-tago-auth": "legacy"},
         )
@@ -200,7 +201,7 @@ async def test_out_of_order_events_before_list_nodes_ignored(patch_wsconnect, lo
 
 @pytest.mark.asyncio
 async def test_unsolicited_unknown_source_message_no_crash(patch_wsconnect, login_ok_payload) -> None:
-    nodes = _nodes([{"id": "switch-1", "type": "relay_switch", "name": "S", "location": "A", "tag": "S1"}])
+    nodes = _nodes([{"id": "switch-1", "type": "outlet_onoff", "name": "S", "location": "A", "tag": "S1"}])
     ws = patch_wsconnect(
         FakeWSConnection(
             recv_messages=[login_ok_payload],
@@ -222,7 +223,7 @@ async def test_unsolicited_unknown_source_message_no_crash(patch_wsconnect, logi
 
 @pytest.mark.asyncio
 async def test_non_object_json_payloads_do_not_hang_disconnect(patch_wsconnect, login_ok_payload) -> None:
-    nodes = _nodes([{"id": "switch-1", "type": "relay_switch", "name": "S", "location": "A", "tag": "S1"}])
+    nodes = _nodes([{"id": "switch-1", "type": "outlet_onoff", "name": "S", "location": "A", "tag": "S1"}])
     ws = patch_wsconnect(
         FakeWSConnection(
             recv_messages=[login_ok_payload],
@@ -241,7 +242,7 @@ async def test_non_object_json_payloads_do_not_hang_disconnect(patch_wsconnect, 
 
 @pytest.mark.asyncio
 async def test_large_valid_payload_does_not_stall_shutdown(patch_wsconnect, login_ok_payload) -> None:
-    nodes = _nodes([{"id": "switch-1", "type": "relay_switch", "name": "S", "location": "A", "tag": "S1"}])
+    nodes = _nodes([{"id": "switch-1", "type": "outlet_onoff", "name": "S", "location": "A", "tag": "S1"}])
     large_value = "x" * 20000
     ws = patch_wsconnect(
         FakeWSConnection(

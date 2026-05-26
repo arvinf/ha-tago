@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import pytest
 
 from custom_components.tago.config_flow import TagoConfigFlowHandler
-from custom_components.tago.const import CONF_AUTHKEY, CONF_HOSTSTR
+from custom_components.tago.const import CONF_HOSTSTR, CONF_PIN
 
 
 @dataclass
@@ -26,7 +26,7 @@ async def test_zeroconf_discovery_populates_host_and_name() -> None:
         seen_unique_ids.append(value)
 
     flow.async_set_unique_id = _set_unique_id  # type: ignore[method-assign]
-    flow._abort_if_unique_id_configured = lambda: None  # type: ignore[method-assign]
+    flow._abort_if_unique_id_configured = lambda **kw: None  # type: ignore[method-assign]
 
     result = await flow.async_step_zeroconf(
         _DiscoveryInfo(
@@ -62,7 +62,7 @@ async def test_user_flow_connection_failure_returns_cannot_connect(monkeypatch) 
     flow.context = {"source": "user"}
 
     result = await flow.async_step_user(
-        {CONF_HOSTSTR: "http://invalid-host", CONF_AUTHKEY: "abc"}
+        {CONF_HOSTSTR: "http://invalid-host", CONF_PIN: "abc"}
     )
 
     assert result["type"] == "form"
@@ -122,7 +122,7 @@ async def test_user_flow_success_creates_entry_and_uses_optional_auth(monkeypatc
         seen_unique_ids.append(value)
 
     flow.async_set_unique_id = _set_unique_id  # type: ignore[method-assign]
-    flow._abort_if_unique_id_configured = lambda: None  # type: ignore[method-assign]
+    flow._abort_if_unique_id_configured = lambda **kw: None  # type: ignore[method-assign]
 
     result = await flow.async_step_user({CONF_HOSTSTR: "dev.local:443"})
 
@@ -130,7 +130,7 @@ async def test_user_flow_success_creates_entry_and_uses_optional_auth(monkeypatc
     assert result["type"] == "create_entry"
     assert result["title"] == "M-1 SN-1"
     assert result["data"][CONF_HOSTSTR] == "dev.local:443"
-    assert result["data"][CONF_AUTHKEY] == ""
+    assert result["data"][CONF_PIN] == ""
 
 
 @pytest.mark.asyncio
@@ -166,10 +166,150 @@ async def test_connection_test_attempts_disconnect_after_connect_error(monkeypat
 
     flow = TagoConfigFlowHandler()
     flow.context = {"source": "user"}
-    result = await flow.async_step_user({CONF_HOSTSTR: "dev.local:443", CONF_AUTHKEY: "k"})
+    result = await flow.async_step_user({CONF_HOSTSTR: "dev.local:443", CONF_PIN: "k"})
 
     assert result["errors"]["base"] == "cannot_connect"
     assert calls == ["connect", "disconnect"]
+
+
+# =====================================================================
+# Zeroconf-flow branches (lines 81-82, 117, 125, 131-132)
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_zeroconf_confirm_submission_proceeds_to_connection_test(monkeypatch) -> None:
+    """async_step_zeroconf_confirm with user_input dispatches to test_connection
+    (covers lines 81-82)."""
+    captured = {}
+
+    class FakeDevice:
+        def __init__(self, host: str, authkey: str):
+            self.unique_id = "SN-Z"
+            self.serial_num = "SN-Z"
+            self.model_num = "M-Z"
+            captured["host"] = host
+            captured["authkey"] = authkey
+
+        async def connect(self, timeout: float = 0) -> None:
+            return None
+
+        async def disconnect(self, timeout: float = 0) -> None:
+            return None
+
+    monkeypatch.setattr("custom_components.tago.config_flow.TagoDevice", FakeDevice)
+
+    flow = TagoConfigFlowHandler()
+    flow.context = {"source": "zeroconf"}
+    flow.hoststr = "tago-zc.local:443"
+    flow.device_name = "SN-Z"
+
+    async def _set_unique_id(value: str):
+        return None
+
+    flow.async_set_unique_id = _set_unique_id  # type: ignore[method-assign]
+    flow._abort_if_unique_id_configured = lambda **kw: None  # type: ignore[method-assign]
+
+    result = await flow.async_step_zeroconf_confirm({CONF_PIN: "key123"})
+
+    assert result["type"] == "create_entry"
+    assert captured["authkey"] == "key123"
+    assert captured["host"] == "tago-zc.local:443"
+
+
+@pytest.mark.asyncio
+async def test_zeroconf_flow_invalid_auth_returns_to_zeroconf_confirm(monkeypatch) -> None:
+    """A zeroconf-sourced flow that gets PermissionError loops back to
+    zeroconf_confirm (covers line 117)."""
+
+    class FakeDevice:
+        def __init__(self, host: str, authkey: str):
+            pass
+
+        async def connect(self, timeout: float = 0) -> None:
+            raise PermissionError("bad auth")
+
+        async def disconnect(self, timeout: float = 0) -> None:
+            return None
+
+    monkeypatch.setattr("custom_components.tago.config_flow.TagoDevice", FakeDevice)
+
+    flow = TagoConfigFlowHandler()
+    flow.context = {"source": "zeroconf"}
+    flow.hoststr = "tago-zc.local:443"
+    flow.device_name = "SN-Z"
+
+    result = await flow.async_step_zeroconf_confirm({CONF_PIN: "wrong"})
+
+    assert result["type"] == "form"
+    assert result["step_id"] == "zeroconf_confirm"
+    assert result["errors"]["base"] == "invalid_auth"
+
+
+@pytest.mark.asyncio
+async def test_zeroconf_flow_connection_failure_returns_to_zeroconf_confirm(monkeypatch) -> None:
+    """A zeroconf-sourced flow that gets OSError loops back to
+    zeroconf_confirm (covers line 125)."""
+
+    class FakeDevice:
+        def __init__(self, host: str, authkey: str):
+            pass
+
+        async def connect(self, timeout: float = 0) -> None:
+            raise OSError("connect refused")
+
+        async def disconnect(self, timeout: float = 0) -> None:
+            return None
+
+    monkeypatch.setattr("custom_components.tago.config_flow.TagoDevice", FakeDevice)
+
+    flow = TagoConfigFlowHandler()
+    flow.context = {"source": "zeroconf"}
+    flow.hoststr = "tago-zc.local:443"
+    flow.device_name = "SN-Z"
+
+    result = await flow.async_step_zeroconf_confirm({CONF_PIN: "k"})
+
+    assert result["type"] == "form"
+    assert result["step_id"] == "zeroconf_confirm"
+    assert result["errors"]["base"] == "cannot_connect"
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cleanup_exception_is_swallowed(monkeypatch, caplog) -> None:
+    """The finally-block disconnect must not propagate exceptions
+    (covers lines 131-132)."""
+    import logging
+
+    class FakeDevice:
+        def __init__(self, host: str, authkey: str):
+            self.unique_id = "SN-X"
+            self.serial_num = "SN-X"
+            self.model_num = "M-X"
+
+        async def connect(self, timeout: float = 0) -> None:
+            return None
+
+        async def disconnect(self, timeout: float = 0) -> None:
+            raise RuntimeError("disconnect failed unexpectedly")
+
+    monkeypatch.setattr("custom_components.tago.config_flow.TagoDevice", FakeDevice)
+
+    flow = TagoConfigFlowHandler()
+    flow.context = {"source": "user"}
+
+    async def _set_unique_id(value: str):
+        return None
+
+    flow.async_set_unique_id = _set_unique_id  # type: ignore[method-assign]
+    flow._abort_if_unique_id_configured = lambda **kw: None  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.DEBUG):
+        result = await flow.async_step_user({CONF_HOSTSTR: "dev:443", CONF_PIN: "k"})
+
+    # Entry created despite the disconnect error.
+    assert result["type"] == "create_entry"
+    # The exception was logged at debug level.
+    assert any("Connection cleanup failed" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -197,9 +337,9 @@ async def test_connection_test_attempts_disconnect_after_success(monkeypatch) ->
         return None
 
     flow.async_set_unique_id = _set_unique_id  # type: ignore[method-assign]
-    flow._abort_if_unique_id_configured = lambda: None  # type: ignore[method-assign]
+    flow._abort_if_unique_id_configured = lambda **kw: None  # type: ignore[method-assign]
 
-    result = await flow.async_step_user({CONF_HOSTSTR: "dev.local:443", CONF_AUTHKEY: "k"})
+    result = await flow.async_step_user({CONF_HOSTSTR: "dev.local:443", CONF_PIN: "k"})
 
     assert result["type"] == "create_entry"
     assert calls == ["connect", "disconnect"]

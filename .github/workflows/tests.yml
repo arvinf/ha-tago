@@ -1,0 +1,54 @@
+name: tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-test.txt
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-test.txt
+
+      - name: Make the sister-repo scenario fixtures available
+        # The Layer B / scenario tests load
+        # tagoesp/tests/vectors/wire_scenarios.json from the firmware repo.
+        # In CI we don't have that repo checked out alongside, so point
+        # tests at a copy committed into this repo.
+        # If tests/vectors/wire_scenarios.json is not committed, this step
+        # is a no-op and the loader's fallback path takes over.
+        run: |
+          if [ -f tests/vectors/wire_scenarios.json ]; then
+            echo "Using committed copy at tests/vectors/wire_scenarios.json"
+          else
+            echo "tests/vectors/wire_scenarios.json missing — scenario tests will be skipped."
+            echo "Commit a copy of tagoesp/tests/vectors/wire_scenarios.json under tests/vectors/."
+          fi
+
+      - name: Run pytest
+        env:
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/tests
+        run: |
+          pytest -q tests/ \
+            --maxfail=10 \
+            --cov=custom_components.tago \
+            --cov-report=term-missing

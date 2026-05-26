@@ -7,18 +7,18 @@ from homeassistant.config_entries import ConfigEntry
 from .entity import TagoEntityHA
 from .TagoNet import TagoDevice, TagoSwitch
 
+# Single shared WebSocket; no per-platform serialization needed.
+PARALLEL_UPDATES = 0
+
 class TagoSwitchHA(TagoEntityHA, SwitchEntity):
+    _attr_device_class = SwitchDeviceClass.OUTLET
+
     def __init__(self, entity: TagoSwitch):
         super().__init__(entity)
 
-        if self._entity.type == TagoSwitch.OUTLET:
-            self._attr_device_class = SwitchDeviceClass.OUTLET
-        else:
-            self._attr_device_class = SwitchDeviceClass.SWITCH
-
     @property
-    def is_on(self):
-        return self._entity.state == TagoSwitch.STATE_ON
+    def is_on(self) -> bool:
+        return self._entity.is_on
 
     async def async_turn_on(self, **kwargs):
         await self._entity.turn_on()

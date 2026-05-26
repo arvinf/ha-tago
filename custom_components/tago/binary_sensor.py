@@ -1,13 +1,15 @@
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.entity import DeviceInfo
 
 from .const import DOMAIN
 
 from .TagoNet import TagoDevice
 from . import generate_device_info
+
+PARALLEL_UPDATES = 0
 
 
 async def async_setup_entry(
@@ -23,6 +25,10 @@ async def async_setup_entry(
 
 class OfflineSensor(BinarySensorEntity):
     """A binary sensor to indicate if the device is offline."""
+
+    # Diagnostic category — surfaces device health under the diagnostic
+    # section of the device page rather than mixing with the main controls.
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, device: TagoDevice, hass: HomeAssistant):
         self._device = device

@@ -1,0 +1,255 @@
+# serializer version: 1
+# name: test_light_rgbw_white_mode_when_xy_zero
+  dict({
+    'attributes': dict({
+      'brightness': 204,
+      'color_mode': <ColorMode.WHITE: 'white'>,
+      'friendly_name': 'TAGO_TEST_001 - 1A RGBW Light',
+      'hs_color': None,
+      'rgb_color': None,
+      'supported_color_modes': list([
+        <ColorMode.WHITE: 'white'>,
+        <ColorMode.XY: 'xy'>,
+      ]),
+      'supported_features': <LightEntityFeature.FLASH|TRANSITION: 40>,
+      'xy_color': None,
+    }),
+    'entity_id': 'light.tago_test_001_1a_rgbw_light',
+    'state': 'on',
+  })
+# ---
+# name: test_light_rgbw_xy_mode_when_xy_set
+  dict({
+    'attributes': dict({
+      'brightness': 204,
+      'color_mode': <ColorMode.XY: 'xy'>,
+      'friendly_name': 'TAGO_TEST_001 - 1A RGBW Light',
+      'hs_color': tuple(
+        32.484,
+        61.569,
+      ),
+      'rgb_color': tuple(
+        255,
+        183,
+        98,
+      ),
+      'supported_color_modes': list([
+        <ColorMode.WHITE: 'white'>,
+        <ColorMode.XY: 'xy'>,
+      ]),
+      'supported_features': <LightEntityFeature.FLASH|TRANSITION: 40>,
+      'xy_color': tuple(
+        0.5,
+        0.4,
+      ),
+    }),
+    'entity_id': 'light.tago_test_001_1a_rgbw_light',
+    'state': 'on',
+  })
+# ---
+# name: test_light_rgbww_color_temp_mode_when_xy_zero
+  dict({
+    'attributes': dict({
+      'brightness': 204,
+      'color_mode': <ColorMode.COLOR_TEMP: 'color_temp'>,
+      'color_temp_kelvin': 4600,
+      'friendly_name': 'TAGO_TEST_001 - 1A RGBWW Light',
+      'hs_color': tuple(
+        26.749,
+        24.966,
+      ),
+      'max_color_temp_kelvin': 6500,
+      'min_color_temp_kelvin': 2700,
+      'rgb_color': tuple(
+        255,
+        220,
+        191,
+      ),
+      'supported_color_modes': list([
+        <ColorMode.COLOR_TEMP: 'color_temp'>,
+        <ColorMode.XY: 'xy'>,
+      ]),
+      'supported_features': <LightEntityFeature.FLASH|TRANSITION: 40>,
+      'xy_color': tuple(
+        0.388,
+        0.356,
+      ),
+    }),
+    'entity_id': 'light.tago_test_001_1a_rgbww_light',
+    'state': 'on',
+  })
+# ---
+# name: test_light_subtype_state_shape[light_mono]
+  dict({
+    'attributes': dict({
+      'brightness': None,
+      'color_mode': None,
+      'friendly_name': 'TAGO_TEST_001 - 1A Test light_mono',
+      'supported_color_modes': list([
+        <ColorMode.BRIGHTNESS: 'brightness'>,
+      ]),
+      'supported_features': <LightEntityFeature.FLASH|TRANSITION: 40>,
+    }),
+    'entity_id': 'light.tago_test_001_1a_test_light_mono',
+    'state': 'off',
+  })
+# ---
+# name: test_light_subtype_state_shape[light_rgb]
+  dict({
+    'attributes': dict({
+      'brightness': None,
+      'color_mode': None,
+      'friendly_name': 'TAGO_TEST_001 - 1A Test light_rgb',
+      'hs_color': None,
+      'rgb_color': None,
+      'supported_color_modes': list([
+        <ColorMode.XY: 'xy'>,
+      ]),
+      'supported_features': <LightEntityFeature.FLASH|TRANSITION: 40>,
+      'xy_color': None,
+    }),
+    'entity_id': 'light.tago_test_001_1a_test_light_rgb',
+    'state': 'off',
+  })
+# ---
+# name: test_light_subtype_state_shape[light_rgbw]
+  dict({
+    'attributes': dict({
+      'brightness': None,
+      'color_mode': None,
+      'friendly_name': 'TAGO_TEST_001 - 1A Test light_rgbw',
+      'hs_color': None,
+      'rgb_color': None,
+      'supported_color_modes': list([
+        <ColorMode.WHITE: 'white'>,
+        <ColorMode.XY: 'xy'>,
+      ]),
+      'supported_features': <LightEntityFeature.FLASH|TRANSITION: 40>,
+      'xy_color': None,
+    }),
+    'entity_id': 'light.tago_test_001_1a_test_light_rgbw',
+    'state': 'off',
+  })
+# ---
+# name: test_light_subtype_state_shape[light_rgbww]
+  dict({
+    'attributes': dict({
+      'brightness': None,
+      'color_mode': None,
+      'color_temp_kelvin': None,
+      'friendly_name': 'TAGO_TEST_001 - 1A Test light_rgbww',
+      'hs_color': None,
+      'max_color_temp_kelvin': 6500,
+      'min_color_temp_kelvin': 2700,
+      'rgb_color': None,
+      'supported_color_modes': list([
+        <ColorMode.COLOR_TEMP: 'color_temp'>,
+        <ColorMode.XY: 'xy'>,
+      ]),
+      'supported_features': <LightEntityFeature.FLASH|TRANSITION: 40>,
+      'xy_color': None,
+    }),
+    'entity_id': 'light.tago_test_001_1a_test_light_rgbww',
+    'state': 'off',
+  })
+# ---
+# name: test_light_subtype_state_shape[light_ww]
+  dict({
+    'attributes': dict({
+      'brightness': None,
+      'color_mode': None,
+      'color_temp_kelvin': None,
+      'friendly_name': 'TAGO_TEST_001 - 1A Test light_ww',
+      'hs_color': None,
+      'max_color_temp_kelvin': 6500,
+      'min_color_temp_kelvin': 2700,
+      'rgb_color': None,
+      'supported_color_modes': list([
+        <ColorMode.COLOR_TEMP: 'color_temp'>,
+      ]),
+      'supported_features': <LightEntityFeature.FLASH|TRANSITION: 40>,
+      'xy_color': None,
+    }),
+    'entity_id': 'light.tago_test_001_1a_test_light_ww',
+    'state': 'off',
+  })
+# ---
+# name: test_state_changed_brightness_appears_in_hass_state
+  dict({
+    'attributes': dict({
+      'brightness': 191,
+      'color_mode': <ColorMode.BRIGHTNESS: 'brightness'>,
+      'friendly_name': 'TAGO_TEST_001 - 1A Test Dimmer',
+      'supported_color_modes': list([
+        <ColorMode.BRIGHTNESS: 'brightness'>,
+      ]),
+      'supported_features': <LightEntityFeature.FLASH|TRANSITION: 40>,
+    }),
+    'entity_id': 'light.tago_test_001_1a_test_dimmer',
+    'state': 'on',
+  })
+# ---
+# name: test_state_changed_ct_appears_as_color_temp_kelvin
+  dict({
+    'attributes': dict({
+      'brightness': 204,
+      'color_mode': <ColorMode.COLOR_TEMP: 'color_temp'>,
+      'color_temp_kelvin': 4600,
+      'friendly_name': 'TAGO_TEST_001 - 1A Test CCT',
+      'hs_color': tuple(
+        26.749,
+        24.966,
+      ),
+      'max_color_temp_kelvin': 6500,
+      'min_color_temp_kelvin': 2700,
+      'rgb_color': tuple(
+        255,
+        220,
+        191,
+      ),
+      'supported_color_modes': list([
+        <ColorMode.COLOR_TEMP: 'color_temp'>,
+      ]),
+      'supported_features': <LightEntityFeature.FLASH|TRANSITION: 40>,
+      'xy_color': tuple(
+        0.388,
+        0.356,
+      ),
+    }),
+    'entity_id': 'light.tago_test_001_1a_test_cct',
+    'state': 'on',
+  })
+# ---
+# name: test_state_changed_is_on_appears_for_fan
+  dict({
+    'attributes': dict({
+      'friendly_name': 'TAGO_TEST_001 - 1A Fan',
+      'supported_features': <FanEntityFeature.TURN_OFF|TURN_ON: 48>,
+    }),
+    'entity_id': 'fan.tago_test_001_1a_fan',
+    'state': 'on',
+  })
+# ---
+# name: test_state_changed_is_on_appears_for_switch
+  dict({
+    'attributes': dict({
+      'device_class': 'outlet',
+      'friendly_name': 'TAGO_TEST_001 - 1A Pump',
+    }),
+    'entity_id': 'switch.tago_test_001_1a_pump',
+    'state': 'on',
+  })
+# ---
+# name: test_state_changed_position_updates_cover_state
+  dict({
+    'attributes': dict({
+      'current_position': 40,
+      'device_class': 'blind',
+      'friendly_name': 'TAGO_TEST_001 - 1A Blind',
+      'is_closed': False,
+      'supported_features': <CoverEntityFeature.OPEN|CLOSE|SET_POSITION|STOP: 15>,
+    }),
+    'entity_id': 'cover.tago_test_001_1a_blind',
+    'state': 'open',
+  })
+# ---

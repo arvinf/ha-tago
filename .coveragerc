@@ -1,0 +1,34 @@
+[run]
+source = custom_components/tago
+branch = False
+
+[report]
+exclude_lines =
+    pragma: no cover
+
+    # Auth / login / SSL — slated for replacement; intentionally
+    # excluded from coverage until the new auth model lands.
+    async def _authenticate_legacy
+    async def _authenticate_hmac_tls_v2
+    async def _authenticate_connection
+    async def get_ssl_context
+    def _create_context
+    def _get_server_handshake_headers
+    def _select_auth_strategy
+
+    # Defensive guard that can't realistically be exercised
+    raise RuntimeError\("Connection manager did not initialize
+
+    # Re-raise paths
+    raise auth_err from err
+    raise asyncio.CancelledError
+
+    # Auth PermissionError handler block in connection_task — runs only
+    # under the auth path that's slated for replacement.
+    except PermissionError as err:
+
+    # Repr / debug-only branches
+    def __repr__\(
+
+show_missing = True
+skip_covered = False

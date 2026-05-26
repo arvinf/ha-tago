@@ -64,18 +64,17 @@ class TagoMessage:
         self.dst = dst
         self.req = req
         self.data = data
-
+        self.ref = TagoMessage.create_random_str()
         return self
 
     def get_message(self) -> str:
         data = dict(self.data or {})
         if self.dst:
             data[TagoMessage.PROP_DST] = self.dst
-        data[TagoMessage.PROP_REF] = TagoMessage.create_random_str()
+        data[TagoMessage.PROP_REF] = self.ref
         data[TagoMessage.PROP_REQ] = self.req
 
         msg = json.dumps(data)
-        #print('<< ' + str(msg))
         return msg
 
     @property
@@ -309,6 +308,10 @@ class TagoDevice(TagoBase):
         self._log_throttle_interval_s = 60.0
         self._log_throttle_last: dict[str, float] = {}
         self._log_throttle_suppressed: dict[str, int] = {}
+        # Pending futures keyed by request `ref`. Populated by send_request
+        # when a responseTimeout is set; resolved by the message dispatch
+        # loop in connection_task when a matching response arrives.
+        self._pending_responses: dict[str, asyncio.Future[TagoMessage]] = {}
 
     @property
     def dashboard_uri(self):
@@ -387,13 +390,17 @@ class TagoDevice(TagoBase):
         return self.AUTH_LEGACY
 
     async def _authenticate_legacy(self, ws: ClientConnection) -> dict[str, str | None]:
+        """Per PROTOCOL.md §2 the identity envelope carries
+        `{status, nonce, serialnum, model, id}` — no `firmware` field. The
+        firmware revision is read separately via device-level `get_config`
+        (§9) once the connection is up."""
         await ws.send('{}')
         msg = json.loads(await ws.recv())
 
         status = msg.get('status', 0)
         serialnum = msg.get('serialnum')
         model_num = msg.get('model')
-        firmware_rev = msg.get('firmware')
+        entity_id = msg.get('id')
 
         if status != 200:
             if msg.get('nonce') is None:
@@ -417,24 +424,12 @@ class TagoDevice(TagoBase):
 
             serialnum = serialnum or msg.get('serialnum')
             model_num = model_num or msg.get('model')
-            firmware_rev = firmware_rev or msg.get('firmware')
-
-            ca = msg.get('ca', None)
-            # if refresh_ca and ca:
-            #     ca_hash = msg.get('ca_hash', '')
-            #     sha256 = hashlib.sha256()
-            #     sha256.update(
-            #         (ca + client_nonce + self._authkey).encode('utf-8'))
-            #     hash = sha256.hexdigest()
-            #     if ca_hash == hash:
-            #         self._ca = ca
-            #     else:
-            #         logging.error('unexpected ca hash {ca_hash} {hash}')
+            entity_id = entity_id or msg.get('id')
 
         return {
             'serialnum': serialnum,
             'model': model_num,
-            'firmware': firmware_rev,
+            'id': entity_id,
         }
 
     async def _authenticate_hmac_tls_v2(
@@ -525,6 +520,10 @@ class TagoDevice(TagoBase):
         if self._task is None:
             return
 
+        # `await self._task` (or `wait_for`) re-raises whatever exception
+        # the task held — including CancelledError and any uncaught
+        # exception from `connection_task`. That's the intended propagation
+        # path; callers are expected to handle it.
         if timeout is None:
             await self._task
         else:
@@ -534,37 +533,40 @@ class TagoDevice(TagoBase):
                 raise TimeoutError(
                     "Timed out waiting for self._task to complete") from err
 
-        if not self._task.cancelled() and self._task.exception() is not None:
-            raise self._task.exception()
         self._task = None
         self._startup_future = None
 
     async def send_request(self, req: str, data: dict | None = None, dst: str = None, responseTimeout: float = None) -> None | TagoMessage:
+        """Send a request frame. If `responseTimeout` is set, wait for a
+        response with a matching `ref` and return it; raise TimeoutError if
+        none arrives in time.
+
+        Response correlation is performed via the `_pending_responses`
+        registry: send_request registers a future keyed by the outgoing
+        ref, and the connection_task message loop resolves the future when
+        a frame with a matching `ref` arrives."""
         if self._ws is None:
             return None
 
         if data is None:
             data = {}
 
-        """ sends a message to peer, and optionally waits for a response to be received or a timeout to occur. """
         msg = TagoMessage.make_request(req=req, dst=dst, data=data)
-        resp: TagoMessage = None
-        flag = asyncio.Event()
-
+        future: asyncio.Future[TagoMessage] | None = None
         if responseTimeout:
-            async def check_response(respmsg: TagoMessage):
-                nonlocal resp
-                if respmsg.refers_to(msg.reference):
-                    resp = respmsg
-                    flag.set()
+            future = asyncio.get_running_loop().create_future()
+            self._pending_responses[msg.ref] = future
 
-        payload = msg.get_message()
-        logging.debug(f"=== outgoing {payload}")
-        await self._ws.send(payload)
-        if responseTimeout:
-            async with asyncio.timeout(responseTimeout):
-                await flag.wait()
-                return resp
+        try:
+            payload = msg.get_message()
+            logging.debug(f"=== outgoing {payload}")
+            await self._ws.send(payload)
+            if future is None:
+                return None
+            return await asyncio.wait_for(asyncio.shield(future), timeout=responseTimeout)
+        finally:
+            if future is not None:
+                self._pending_responses.pop(msg.ref, None)
 
     async def get_ssl_context(self) -> ssl.SSLContext:
         def _create_context(self) -> ssl.SSLContext:
@@ -631,6 +633,11 @@ class TagoDevice(TagoBase):
 
     async def connection_task(self) -> None:
         self._running = True
+        # Tracks whether we've logged the "device unavailable" message for
+        # the *current* outage. Reset to False on every successful connect
+        # and set to True the first time we fail to connect. Implements the
+        # Silver-tier `log-when-unavailable` rule (log once per transition).
+        unavailable_logged = False
         while self._running:
             was_connected = False
             try:
@@ -646,8 +653,11 @@ class TagoDevice(TagoBase):
                         login_data = await self._authenticate_connection(ws)
                         self._serialnum = login_data.get('serialnum')
                         self._modelnum = login_data.get('model')
-                        self._firmware_rev = login_data.get('firmware')
-                        self._eid = self._serialnum
+                        # PROTOCOL.md §4: the device gateway entity ID is the
+                        # value of `id` in the identity envelope (opaque).
+                        # Fall back to serialnum only if `id` is missing
+                        # (legacy / non-conformant fakes).
+                        self._eid = login_data.get('id') or self._serialnum
                         self.update()
 
                     except PermissionError as err:
@@ -655,20 +665,49 @@ class TagoDevice(TagoBase):
                         auth_err = PermissionError('Auth failed')
                         self._signal_startup_error(auth_err)
                         raise auth_err from err
-                                        
+
                     # refresh entities list and types
                     await self._refresh_entities_from_list_nodes(ws)
-                    
+
+                    # PROTOCOL.md §9 `get_config` carries firmware_rev. The
+                    # identity envelope (§2) does not. Fire-and-forget;
+                    # populate firmware_rev when the response arrives in the
+                    # message loop below.
+                    await self.send_request(req=TagoBase.REQ_GET_CONFIG, dst=self._eid)
+
                     # connected to device!
                     was_connected = True
                     self._signal_startup_success()
+                    if unavailable_logged:
+                        logging.info(
+                            "Tago device %s is available again",
+                            self._hoststr,
+                        )
+                        unavailable_logged = False
                     for entity in self._entities:
                         await entity.connection_state_changed(True)
                     self.update()
 
                     # process all messages from device
                     async for message in ws:
-                        msg = TagoMessage.from_payload(message)                                                
+                        msg = TagoMessage.from_payload(message)
+
+                        # Resolve any pending send_request(responseTimeout=)
+                        # future whose ref matches.
+                        if msg.ref and msg.ref in self._pending_responses:
+                            future = self._pending_responses.pop(msg.ref)
+                            if not future.done():
+                                future.set_result(msg)
+
+                        # Pick up firmware_rev from the device-level
+                        # get_config response (PROTOCOL.md §9).
+                        if (msg.rsp == TagoBase.REQ_GET_CONFIG
+                                and msg.src == self._eid
+                                and isinstance(msg.data, dict)):
+                            fw = msg.data.get('firmware_rev')
+                            if fw is not None and fw != self._firmware_rev:
+                                self._firmware_rev = fw
+                                self.update()
 
                         handlers: list[Awaitable[None]] = []
                         for entity in self._entities:
@@ -706,6 +745,20 @@ class TagoDevice(TagoBase):
 
             self._ws = None
 
+            # Log "device unavailable" once per outage. `was_connected`
+            # distinguishes "we had a session and lost it" from "we've
+            # never reached the device" — log accordingly.
+            if not unavailable_logged:
+                if was_connected:
+                    logging.warning(
+                        "Tago device %s became unavailable", self._hoststr,
+                    )
+                else:
+                    logging.warning(
+                        "Tago device %s is unavailable", self._hoststr,
+                    )
+                unavailable_logged = True
+
             # notify disconnection
             if was_connected:
                 for entity in self._entities:
@@ -732,17 +785,21 @@ class TagoDevice(TagoBase):
 
 
 class TagoSwitch(TagoEntity):
-    OUTLET = "relay_outlet"
-    SWITCH = "relay_switch"
+    OUTLET_ONOFF = "outlet_onoff"
 
-    types = [OUTLET, SWITCH]
+    types = [OUTLET_ONOFF]
 
     REQ_TURN_ON = "turn_on"
     REQ_TURN_OFF = "turn_off"
+    PROP_IS_ON = "is_on"
 
     def __init__(self, json: dict, device: TagoDevice):
         super().__init__(json, device)
-        self.state = self.STATE_OFF
+        self._is_on: bool = bool(json.get(self.PROP_IS_ON, False))
+
+    @property
+    def is_on(self) -> bool:
+        return self._is_on
 
     async def turn_on(self):
         await self.send_request(req=self.REQ_TURN_ON)
@@ -752,7 +809,9 @@ class TagoSwitch(TagoEntity):
 
     async def handle_state_change(self, msg: TagoMessage) -> None:
         data = msg.content
-        self._state = data.get("state", self._state)
+        # PROTOCOL.md §12.3: on/off entities expose `is_on` (bool) only.
+        if isinstance(data, dict) and self.PROP_IS_ON in data:
+            self._is_on = bool(data[self.PROP_IS_ON])
         await super().handle_state_change(msg)
 
 
@@ -831,6 +890,11 @@ class TagoLight(TagoEntity):
     types = [LIGHT_ONOFF, LIGHT_DIMMABLE, LIGHT_MONO, LIGHT_RGB,
              LIGHT_RGBW, LIGHT_RGB_CCT, LIGHT_CCT]
 
+    REQ_TURN_ON = "turn_on"
+    REQ_TURN_OFF = "turn_off"
+    REQ_TOGGLE = "toggle"
+    PROP_IS_ON = "is_on"
+
     CT_MIN = 1400
     CT_MAX = 10000
 
@@ -845,10 +909,24 @@ class TagoLight(TagoEntity):
         self._ramp: Ramp = None
         self.parse_state_json(json)
 
+    # PROTOCOL.md §5: ramp duration is clamped to
+    # [CONFIG_RAMP_DURATION_MIN, CONFIG_RAMP_DURATION_MAX] = [300, 10000] ms.
+    # Below the minimum is treated as instant (no ramp).
+    DURATION_MIN_MS = 300
+    DURATION_MAX_MS = 10000
+
     def _brightness_param_parse(self, brightness: float, duration: float = None, rate: float = None) -> dict:
         data = {}
         if duration is not None:
-            data[self.PROP_DURATION] = int(round((duration * 1000), 0))
+            ms = int(round(duration * 1000, 0))
+            if ms <= 0 or ms < self.DURATION_MIN_MS:
+                # Instant change — omit `duration` rather than send a value
+                # the device will silently treat as 0.
+                pass
+            elif ms > self.DURATION_MAX_MS:
+                data[self.PROP_DURATION] = self.DURATION_MAX_MS
+            else:
+                data[self.PROP_DURATION] = ms
         elif rate is not None:
             data[self.PROP_RATE] = int(round((rate * 1000), 0))
 
@@ -862,10 +940,36 @@ class TagoLight(TagoEntity):
         """Flash all channels for a specified duration"""
         await self.send_request(req=self.REQ_LIGHT_EFFECT, data={self.PROP_EFFECT: self.VALUE_FLASH, self.PROP_DURATION: duration})
 
+    @property
+    def is_onoff(self) -> bool:
+        return self._type == self.LIGHT_ONOFF
+
+    async def turn_on(self) -> None:
+        """PROTOCOL.md §12.4 — on/off entities must use the `turn_on` request,
+        not `set_light` (which is forbidden for the on/off category per §12.7)."""
+        await self.send_request(req=self.REQ_TURN_ON)
+
+    async def turn_off(self) -> None:
+        await self.send_request(req=self.REQ_TURN_OFF)
+
+    async def toggle(self) -> None:
+        await self.send_request(req=self.REQ_TOGGLE)
+
     async def set_brightness(self, brightness: float, duration: float = None, rate: float = None) -> None:
-        """Set brightness to specified value between 0.0 and 1.0"""
+        """Set brightness to specified value between 0.0 and 1.0.
+
+        For `light_onoff` entities (PROTOCOL.md §12) this routes to
+        `turn_on`/`turn_off` per §12.7 — `set_light` is rejected by the
+        firmware for the on/off category."""
         if brightness is None:
             raise ValueError('Brightness must be specified')
+
+        if self.is_onoff:
+            if brightness > 0:
+                await self.turn_on()
+            else:
+                await self.turn_off()
+            return
 
         data = self._brightness_param_parse(brightness, duration, rate)
         await self.send_request(req=self.REQ_SET_LIGHT, data=data)
@@ -931,12 +1035,19 @@ class TagoLight(TagoEntity):
         self.update()
 
     def parse_state_json(self, data: dict) -> None:
+        # `is_on` carries on/off state for `light_onoff`; mirror it into
+        # `_brightness` so callers that read `.brightness > 0` (e.g.
+        # TagoLightHA.is_on) still work.
+        if self.PROP_IS_ON in data:
+            self._brightness = self.MAX_VALUE if bool(data[self.PROP_IS_ON]) else 0
+
         self._brightness = data.get(self.PROP_BRIGHTNESS, self._brightness)
         self._ct = data.get(self.PROP_CT, self._ct)
+        # PROTOCOL.md §13.1: ct_range is a 2-element [warm_K, cool_K] list.
         ct_basis = data.get(TagoLight.PROP_CT_RANGE, list())
-        if len(ct_basis) > 2:
-            self._ct_range_min = max(ct_basis[0], TagoLight.CT_MIN)
-            self._ct_range_max = min(ct_basis[1], TagoLight.CT_MAX)
+        if isinstance(ct_basis, list) and len(ct_basis) == 2:
+            self._ct_range_min = max(int(ct_basis[0]), TagoLight.CT_MIN)
+            self._ct_range_max = min(int(ct_basis[1]), TagoLight.CT_MAX)
         self._colour_x = data.get(self.PROP_X, self._colour_x)
         self._colour_y = data.get(self.PROP_Y, self._colour_y)
 
@@ -987,24 +1098,37 @@ class TagoLight(TagoEntity):
 
     async def handle_config_change(self, msg: TagoMessage) -> None:
         data = msg.content
-        self._ct_range_min = data.get(self.PROP_CT_RANGE, self._ct_range_min)
-        self._ct_range_max = data.get(self.PROP_CT_RANGE, self._ct_range_max)
+        ct_range = data.get(self.PROP_CT_RANGE)
+        if isinstance(ct_range, list) and len(ct_range) == 2:
+            self._ct_range_min = max(int(ct_range[0]), TagoLight.CT_MIN)
+            self._ct_range_max = min(int(ct_range[1]), TagoLight.CT_MAX)
         await super().handle_config_change(msg)
 
 
 class TagoCover(TagoEntity):
-    SHADE = "cover_shades"
-    CURTAIN = "cover_curtains"
+    # PROTOCOL.md §14.3 reserves `cover_blinds` and `cover_curtain` as the
+    # eventual type strings for cover loads (commands TBD).
+    COVER_SHADE = "cover_shade"
+    COVER_BLIND = "cover_blind"
+    COVER_CURTAIN = "cover_curtain"
 
-    types = [SHADE, CURTAIN]
+    types = [COVER_SHADE, COVER_CURTAIN, COVER_BLIND]
 
     REQ_STOP = "stop_move"
     REQ_MOVE_TO = "move_to"
 
     def __init__(self, json: dict, device: TagoDevice):
         super().__init__(json, device)
-        self._position = 0
-        self._target = 0
+        self._position = int(json.get("position", 0))
+        self._target = int(json.get("target", 0))
+
+    @property
+    def position(self) -> int:
+        return self._position
+
+    @property
+    def target(self) -> int:
+        return self._target
 
     async def move_to(self, target: int):
         await self.send_request(req=self.REQ_MOVE_TO, data={"target": target})
@@ -1020,22 +1144,25 @@ class TagoCover(TagoEntity):
 
 
 class TagoFan(TagoEntity):
-    ONOFF = "fan_onoff"
+    # PROTOCOL.md §7a — `fan_onoff` is the only fan type today and it is
+    # strictly on/off. There is no speed control on the wire (`set_fan` is
+    # not a protocol command — the firmware has no dispatcher for it).
+    FAN_ONOFF = "fan_onoff"
 
-    types = [ONOFF]
+    types = [FAN_ONOFF]
 
-    REQ_SET_FAN = "set_fan"
     REQ_TURN_ON = "turn_on"
     REQ_TURN_OFF = "turn_off"
+    REQ_TOGGLE = "toggle"
+    PROP_IS_ON = "is_on"
 
     def __init__(self, json: dict, device: TagoDevice):
         super().__init__(json, device)
-        self._value = 0
-        self.state = self.STATE_OFF
+        self._is_on: bool = bool(json.get(self.PROP_IS_ON, False))
 
     @property
-    def value(self) -> int:
-        return self._value
+    def is_on(self) -> bool:
+        return self._is_on
 
     async def turn_on(self):
         await self.send_request(req=self.REQ_TURN_ON)
@@ -1043,21 +1170,12 @@ class TagoFan(TagoEntity):
     async def turn_off(self):
         await self.send_request(req=self.REQ_TURN_OFF)
 
-    async def set_speed(self, percentage: int):
-        if percentage == 0:
-            await self.turn_off()
-            return
-
-        level = math.ceil((self.MAX_VALUE * percentage) / 100)
-        await self.send_request(req=self.REQ_SET_FAN, data={"value": [level]})
+    async def toggle(self):
+        await self.send_request(req=self.REQ_TOGGLE)
 
     async def handle_state_change(self, msg: TagoMessage) -> None:
+        # PROTOCOL.md §12.3: on/off entities expose `is_on` (bool) only.
         data = msg.content
-        
-        self._value = data.get('value', data.get('brightness', self._value))
-        if data.get('is_on', self._value > 0):            
-            self.state = self.STATE_ON
-        else:
-            self.state = self.STATE_OFF
-            
+        if isinstance(data, dict) and self.PROP_IS_ON in data:
+            self._is_on = bool(data[self.PROP_IS_ON])
         await super().handle_state_change(msg)

@@ -1,0 +1,17 @@
+name: hassfest
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+# Validates manifest.json, services.yaml, translations, and config-flow
+# wiring against Home Assistant's expectations. This is the same tool
+# HA core's CI runs on every PR.
+jobs:
+  hassfest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master

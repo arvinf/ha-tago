@@ -12,13 +12,23 @@ from homeassistant.config_entries import ConfigEntry
 from .entity import TagoEntityHA
 from .TagoNet import TagoCover, TagoDevice
 
+# Single shared WebSocket; no per-platform serialization needed.
+PARALLEL_UPDATES = 0
+
 class TagoCoverHA(TagoEntityHA, CoverEntity):
+    # Map TagoCover type → HA CoverDeviceClass. Keep aligned with
+    # TagoCover.types (TagoNet.py:1088).
+    _DEVICE_CLASS_BY_TYPE = {
+        TagoCover.COVER_SHADE: CoverDeviceClass.SHADE,
+        TagoCover.COVER_BLIND: CoverDeviceClass.BLIND,
+        TagoCover.COVER_CURTAIN: CoverDeviceClass.CURTAIN,
+    }
+
     def __init__(self, entity: TagoCover):
         super().__init__(entity)
-        if self._entity.type == TagoCover.CURTAIN:
-            self._attr_device_class = CoverDeviceClass.CURTAIN
-        else:
-            self._attr_device_class = CoverDeviceClass.SHADE
+        self._attr_device_class = self._DEVICE_CLASS_BY_TYPE.get(
+            self._entity.type, CoverDeviceClass.SHADE
+        )
 
     @property
     def current_cover_position(self) -> int:

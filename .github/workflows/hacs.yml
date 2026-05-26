@@ -1,0 +1,23 @@
+name: hacs
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  schedule:
+    # Weekly heartbeat so HACS catches schema drift even when nothing
+    # changed in the integration.
+    - cron: "0 0 * * 0"
+
+# Validates the repository against the HACS submission rules: presence of
+# hacs.json, info content, manifest fields, and Brands data.
+jobs:
+  hacs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: HACS validation
+        uses: hacs/action@main
+        with:
+          category: integration

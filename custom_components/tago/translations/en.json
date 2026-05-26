@@ -7,29 +7,51 @@
         "title": "Add New Tago Device",
         "data": {
           "hostname": "Host",
-          "authkey": "Authentication Key"
+          "pin": "Device PIN"
         },
         "data_description": {
-          "hostname": "The hostname or IP address of the Tago Device.",
-          "authkey": "You can find this on the device dashboard."
+          "hostname": "The hostname or IP address of the Tago device.",
+          "pin": "The PIN displayed on the device, or printed on the device label. Leave empty if the device has not been secured with a PIN."
         }
       },
       "zeroconf_confirm": {
         "title": "Add Device",
         "data": {
-          "authkey": "Authentication Key"
+          "pin": "Device PIN"
         },
         "data_description": {
-          "authkey": "You can find this on the device dashboard."
+          "pin": "The PIN displayed on the device, or printed on the device label. Leave empty if the device has not been secured with a PIN."
         },
-        "description": "Do you want to add Tago Device `{device_name}` to Home Assistant?"
+        "description": "Do you want to add Tago device `{device_name}` to Home Assistant?"
+      },
+      "reauth_confirm": {
+        "title": "Re-enter device PIN",
+        "description": "Authentication failed for Tago device `{device_name}`. The device may now be secured with a PIN — please enter the current PIN to reconnect.",
+        "data": {
+          "pin": "Device PIN"
+        },
+        "data_description": {
+          "pin": "The PIN displayed on the device, or printed on the device label."
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Tago Device",
+        "description": "Change the hostname or PIN for this Tago device. The new values are validated by connecting to the device before they are saved.",
+        "data": {
+          "hostname": "Host",
+          "pin": "Device PIN"
+        },
+        "data_description": {
+          "hostname": "The hostname or IP address of the Tago device.",
+          "pin": "The PIN displayed on the device. Leave empty if the device has not been secured with a PIN."
+        }
       }
     },
     "error": {
       "already_in_progress": "This device is already in the process of being added.",
       "already_configured": "This device has already been configured.",
       "cannot_connect": "Cannot connect to device.",
-      "invalid_auth": "Authentication failed.",
+      "invalid_auth": "Authentication failed — the PIN may be incorrect.",
       "unknown": "Unexpected error"
     },
     "abort": {
@@ -37,7 +59,39 @@
       "already_configured": "This device has already been configured.",
       "cannot_connect": "Cannot connect to device.",
       "invalid_auth": "Authentication failed.",
+      "reauth_successful": "Re-authentication was successful.",
+      "reconfigure_successful": "Configuration updated.",
+      "wrong_device": "The host you entered belongs to a different Tago device. To re-add a different device, remove this entry first and add the new one.",
       "unknown": "Unexpected error"
+    }
+  },
+  "exceptions": {
+    "auth_failed": {
+      "message": "Authentication failed for the Tago device at {host}. The device's PIN may have changed."
+    },
+    "cannot_connect": {
+      "message": "Unable to connect to the Tago device at {host}."
+    }
+  },
+  "issues": {
+    "firmware_too_old": {
+      "title": "Tago device firmware out of date",
+      "description": "Tago device `{serial}` is running firmware {current}. The integration requires firmware {minimum} or newer for full functionality. Please update the device firmware via its web UI, then reload the integration to clear this notice."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "device_status": {
+        "name": "Device status"
+      }
+    },
+    "button": {
+      "reboot_device": {
+        "name": "Reboot device"
+      },
+      "identify_device": {
+        "name": "Identify device"
+      }
     }
   }
 }
