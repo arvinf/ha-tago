@@ -10,8 +10,7 @@ Replies are observed via `fake_server.sent` rather than via
 integration can't construct, and per-frame observability is cheaper to
 assert on than threading return values through the integration.
 
-The fake server assumes a protocol-conformant firmware (CLIENT_TEST_GUIDE
-§5 F-deviations are treated as already-fixed).
+The fake server assumes a protocol-conformant firmware.
 """
 from __future__ import annotations
 
@@ -21,7 +20,7 @@ import uuid
 
 import pytest
 
-from custom_components.tago.TagoNet import TagoDevice, TagoLight, TagoMessage
+from custom_components.tago.TagoNet import TagoDevice, TagoGateway, TagoLight, TagoMessage
 from scenarios import DEVICE_ID, GROUP_ID, get as get_scenario
 
 L0 = "TAGO_TEST_001L1_0"
@@ -47,7 +46,9 @@ async def _send_raw_and_wait_reply(device, server, frame: dict, timeout: float =
     the WS with a known ref, then wait for the server's reply with that ref."""
     ref = frame.get("ref") or f"t-{uuid.uuid4().hex[:6]}"
     frame["ref"] = ref
-    await device._ws.send(json.dumps(frame))
+    # The WS lives on the parent gateway; per-device commands target
+    # the device id via `dst` in the frame.
+    await device._gateway._ws.send(json.dumps(frame))
     ok = await _wait_for(
         lambda: any(m.get("ref") == ref and "rsp" in m for m in server.sent),
         timeout=timeout,
@@ -74,7 +75,7 @@ async def test_connect_identity_exchange(connected_device, wire_scenarios):
 @pytest.mark.asyncio
 async def test_reconnect_after_disconnect_preserves_entity_id_mapping(fake_server):
     fake_server.seed({L0: {"type": "light_dimmable", "brightness": 0}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     first_ids = sorted(e.unique_id for e in device.entities)
     await device.disconnect(timeout=5.0)
@@ -93,12 +94,13 @@ async def test_reconnect_after_disconnect_preserves_entity_id_mapping(fake_serve
 
 @pytest.mark.asyncio
 async def test_list_nodes_basic_returns_one_group_with_eight_channels(connected_device):
+    """The integration uses `get_device_info` for initial discovery now
+    (P8), but `list_nodes` is still a valid standalone request on the
+    wire. Send it explicitly and verify the response shape."""
     device, server = connected_device
-    list_nodes_reqs = [r for r in server.received if r.get("req") == "list_nodes"]
-    assert list_nodes_reqs
-    nodes_responses = [r for r in server.sent if r.get("rsp") == "list_nodes"]
-    assert nodes_responses
-    nodes = nodes_responses[0]["nodes"]
+    reply = await _send_raw_and_wait_reply(device, server, {"req": "list_nodes"})
+    assert reply["rsp"] == "list_nodes"
+    nodes = reply["nodes"]
     assert GROUP_ID in nodes
     assert nodes[GROUP_ID]["type"] == "dimac"
     assert nodes[GROUP_ID]["ch"] == 8
@@ -124,7 +126,7 @@ async def test_device_get_config_basic_metadata_shape(connected_device):
 @pytest.mark.asyncio
 async def test_turn_on_onoff_via_set_brightness(fake_server):
     fake_server.seed({L0: {"type": "light_onoff", "is_on": False}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         light = next(e for e in device.entities if e.unique_id == L0)
@@ -141,7 +143,7 @@ async def test_turn_on_onoff_via_set_brightness(fake_server):
 @pytest.mark.asyncio
 async def test_turn_off_onoff_via_set_brightness(fake_server):
     fake_server.seed({L0: {"type": "light_onoff", "is_on": True}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         light = next(e for e in device.entities if e.unique_id == L0)
@@ -157,7 +159,7 @@ async def test_turn_off_onoff_via_set_brightness(fake_server):
 async def test_toggle_onoff_round_trip(fake_server):
     """`toggle` is exposed via TagoLight.toggle() and round-trips on the wire."""
     fake_server.seed({L0: {"type": "light_onoff", "is_on": False}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         light = next(e for e in device.entities if e.unique_id == L0)
@@ -174,7 +176,7 @@ async def test_outlet_onoff_via_TagoSwitch(fake_server):
     """`outlet_onoff` is the protocol type for outlets — TagoSwitch handles it."""
     from custom_components.tago.TagoNet import TagoSwitch
     fake_server.seed({L0: {"type": "outlet_onoff", "is_on": False}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         outlet = next(e for e in device.entities if e.unique_id == L0)
@@ -193,7 +195,7 @@ async def test_fan_onoff_via_TagoFan(fake_server):
     """`fan_onoff` is strictly on/off per PROTOCOL.md §7a — TagoFan handles it."""
     from custom_components.tago.TagoNet import TagoFan
     fake_server.seed({L0: {"type": "fan_onoff", "is_on": False}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         fan = next(e for e in device.entities if e.unique_id == L0)
@@ -214,7 +216,7 @@ async def test_fan_onoff_via_TagoFan(fake_server):
 @pytest.mark.asyncio
 async def test_set_brightness_500_instant(fake_server):
     fake_server.seed({L0: {"type": "light_dimmable", "brightness": 0}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         light = next(e for e in device.entities if e.unique_id == L0)
@@ -230,7 +232,7 @@ async def test_set_brightness_500_instant(fake_server):
 @pytest.mark.asyncio
 async def test_set_brightness_0_turns_off(fake_server):
     fake_server.seed({L0: {"type": "light_dimmable", "brightness": 700}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         light = next(e for e in device.entities if e.unique_id == L0)
@@ -278,7 +280,7 @@ async def test_brightness_plus_delta(connected_device):
 @pytest.mark.asyncio
 async def test_ramp_brightness_1s_emits_ramp_object_in_event(fake_server):
     fake_server.seed({L0: {"type": "light_dimmable", "brightness": 0}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         light = next(e for e in device.entities if e.unique_id == L0)
@@ -349,7 +351,7 @@ async def test_stop_ramp_mid_returns_200(connected_device):
 @pytest.mark.asyncio
 async def test_set_ct_50pct(fake_server):
     fake_server.seed({L0: {"type": "light_ww", "brightness": 500, "ct": 0}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         light = next(e for e in device.entities if e.unique_id == L0)
@@ -377,7 +379,7 @@ async def test_ct_plus_delta_clears_xy(connected_device):
 @pytest.mark.asyncio
 async def test_set_color_red(fake_server):
     fake_server.seed({L0: {"type": "light_rgb", "brightness": 800}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         light = next(e for e in device.entities if e.unique_id == L0)
@@ -478,7 +480,7 @@ async def test_external_state_change_broadcast_reaches_entity(fake_server):
     """Server-initiated state_changed (e.g. physical switch flip) must be
     deliverable to the client without it having sent a command."""
     fake_server.seed({L0: {"type": "light_dimmable", "brightness": 0}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         light = next(e for e in device.entities if e.unique_id == L0)
@@ -526,7 +528,7 @@ async def test_bad_dst_returns_500_and_echoes_src(connected_device):
 async def test_non_string_dst_returns_500(connected_device):
     device, server = connected_device
     ref = "non-str-1"
-    await device._ws.send(json.dumps({"req": "ping", "dst": 42, "ref": ref}))
+    await device._gateway._ws.send(json.dumps({"req": "ping", "dst": 42, "ref": ref}))
     await _wait_for(lambda: any(m.get("ref") == ref for m in server.sent), timeout=1.0)
     reply = next(m for m in server.sent if m.get("ref") == ref)
     assert reply["status"] == 500

@@ -25,6 +25,7 @@ from custom_components.tago.TagoNet import (
     TagoCover,
     TagoDevice,
     TagoFan,
+    TagoGateway,
     TagoLight,
     TagoSwitch,
 )
@@ -109,7 +110,7 @@ def _wrap_ha(device, entity_cls, ha_cls):
 @pytest.mark.asyncio
 async def test_ha_dimmable_async_turn_on_brightness_translates_to_set_light(fake_server):
     fake_server.seed({L0: {"type": "light_dimmable", "brightness": 0}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         from homeassistant.components.light import ATTR_BRIGHTNESS
@@ -131,7 +132,7 @@ async def test_ha_dimmable_async_turn_on_brightness_translates_to_set_light(fake
 @pytest.mark.asyncio
 async def test_ha_dimmable_async_turn_on_with_transition_adds_clamped_duration(fake_server):
     fake_server.seed({L0: {"type": "light_dimmable", "brightness": 0}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         from homeassistant.components.light import ATTR_BRIGHTNESS, ATTR_TRANSITION
@@ -152,7 +153,7 @@ async def test_ha_dimmable_async_turn_on_with_transition_adds_clamped_duration(f
 @pytest.mark.asyncio
 async def test_ha_dimmable_async_turn_on_with_subminimum_transition_omits_duration(fake_server):
     fake_server.seed({L0: {"type": "light_dimmable", "brightness": 0}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         from homeassistant.components.light import ATTR_BRIGHTNESS, ATTR_TRANSITION
@@ -172,7 +173,7 @@ async def test_ha_dimmable_async_turn_on_with_subminimum_transition_omits_durati
 @pytest.mark.asyncio
 async def test_ha_dimmable_async_turn_off_sends_brightness_zero(fake_server):
     fake_server.seed({L0: {"type": "light_dimmable", "brightness": 500}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, _ = _wrap_ha(device, TagoLight, TagoLightHA)
@@ -198,7 +199,7 @@ async def test_ha_cct_async_turn_on_kelvin_translates_to_ct_percent(fake_server)
         L0: {"type": "light_ww", "brightness": 800, "ct": 0,
              "ct_range": [2700, 6500]},
     })
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         from homeassistant.components.light import ATTR_COLOR_TEMP_KELVIN
@@ -226,7 +227,7 @@ async def test_ha_cct_async_turn_on_kelvin_translates_to_ct_percent(fake_server)
 @pytest.mark.asyncio
 async def test_ha_rgb_async_turn_on_xy_translates_to_xy(fake_server):
     fake_server.seed({L0: {"type": "light_rgb", "brightness": 800}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         from homeassistant.components.light import ATTR_XY_COLOR
@@ -251,7 +252,7 @@ async def test_ha_rgb_async_turn_on_xy_translates_to_xy(fake_server):
 @pytest.mark.asyncio
 async def test_ha_onoff_light_async_turn_on_sends_turn_on(fake_server):
     fake_server.seed({L0: {"type": "light_onoff", "is_on": False}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, _ = _wrap_ha(device, TagoLight, TagoLightHA)
@@ -272,7 +273,7 @@ async def test_ha_onoff_light_async_turn_on_sends_turn_on(fake_server):
 @pytest.mark.asyncio
 async def test_ha_onoff_light_async_turn_off_sends_turn_off(fake_server):
     fake_server.seed({L0: {"type": "light_onoff", "is_on": True}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, _ = _wrap_ha(device, TagoLight, TagoLightHA)
@@ -296,7 +297,7 @@ async def test_ha_onoff_light_async_turn_off_sends_turn_off(fake_server):
 @pytest.mark.asyncio
 async def test_ha_switch_async_turn_on_sends_turn_on(fake_server):
     fake_server.seed({L0: {"type": "outlet_onoff", "is_on": False}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, _ = _wrap_ha(device, TagoSwitch, TagoSwitchHA)
@@ -315,7 +316,7 @@ async def test_ha_switch_async_turn_on_sends_turn_on(fake_server):
 @pytest.mark.asyncio
 async def test_ha_switch_async_turn_off_sends_turn_off(fake_server):
     fake_server.seed({L0: {"type": "outlet_onoff", "is_on": True}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, _ = _wrap_ha(device, TagoSwitch, TagoSwitchHA)
@@ -336,7 +337,7 @@ async def test_ha_switch_async_turn_off_sends_turn_off(fake_server):
 @pytest.mark.asyncio
 async def test_ha_fan_async_turn_on_sends_turn_on(fake_server):
     fake_server.seed({L0: {"type": "fan_onoff", "is_on": False}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, _ = _wrap_ha(device, TagoFan, TagoFanHA)
@@ -353,7 +354,7 @@ async def test_ha_fan_async_turn_on_sends_turn_on(fake_server):
 @pytest.mark.asyncio
 async def test_ha_fan_async_turn_off_sends_turn_off(fake_server):
     fake_server.seed({L0: {"type": "fan_onoff", "is_on": True}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, _ = _wrap_ha(device, TagoFan, TagoFanHA)
@@ -374,7 +375,7 @@ async def test_ha_fan_async_turn_off_sends_turn_off(fake_server):
 @pytest.mark.asyncio
 async def test_ha_cover_async_open_sends_move_to_target_zero(fake_server):
     fake_server.seed({L0: {"type": "cover_blind", "position": 100, "target": 100}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, _ = _wrap_ha(device, TagoCover, TagoCoverHA)
@@ -394,7 +395,7 @@ async def test_ha_cover_async_open_sends_move_to_target_zero(fake_server):
 @pytest.mark.asyncio
 async def test_ha_cover_async_close_sends_move_to_target_hundred(fake_server):
     fake_server.seed({L0: {"type": "cover_blind", "position": 0, "target": 0}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, _ = _wrap_ha(device, TagoCover, TagoCoverHA)
@@ -413,7 +414,7 @@ async def test_ha_cover_async_close_sends_move_to_target_hundred(fake_server):
 @pytest.mark.asyncio
 async def test_ha_cover_set_position_inverts_percentage(fake_server):
     fake_server.seed({L0: {"type": "cover_blind", "position": 0, "target": 0}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         from homeassistant.components.cover import ATTR_POSITION
@@ -434,7 +435,7 @@ async def test_ha_cover_set_position_inverts_percentage(fake_server):
 @pytest.mark.asyncio
 async def test_ha_cover_async_stop_sends_stop_move(fake_server):
     fake_server.seed({L0: {"type": "cover_blind", "position": 50, "target": 0}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, _ = _wrap_ha(device, TagoCover, TagoCoverHA)
@@ -455,7 +456,7 @@ async def test_ha_cover_async_stop_sends_stop_move(fake_server):
 @pytest.mark.asyncio
 async def test_state_changed_brightness_reflects_to_ha_brightness(fake_server):
     fake_server.seed({L0: {"type": "light_dimmable", "brightness": 0}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, entity = _wrap_ha(device, TagoLight, TagoLightHA)
@@ -476,7 +477,7 @@ async def test_state_changed_brightness_reflects_to_ha_brightness(fake_server):
 @pytest.mark.asyncio
 async def test_state_changed_brightness_zero_reflects_is_off(fake_server):
     fake_server.seed({L0: {"type": "light_dimmable", "brightness": 1000}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, entity = _wrap_ha(device, TagoLight, TagoLightHA)
@@ -502,7 +503,7 @@ async def test_state_changed_ct_reflects_to_ha_color_temp_kelvin(fake_server):
         L0: {"type": "light_ww", "brightness": 800, "ct": 0,
              "ct_range": [2700, 6500]},
     })
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, entity = _wrap_ha(device, TagoLight, TagoLightHA)
@@ -526,7 +527,7 @@ async def test_state_changed_ct_reflects_to_ha_color_temp_kelvin(fake_server):
 @pytest.mark.asyncio
 async def test_state_changed_xy_reflects_to_ha_xy_color(fake_server):
     fake_server.seed({L0: {"type": "light_rgb", "brightness": 800}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, entity = _wrap_ha(device, TagoLight, TagoLightHA)
@@ -551,7 +552,7 @@ async def test_state_changed_xy_reflects_to_ha_xy_color(fake_server):
 @pytest.mark.asyncio
 async def test_state_changed_is_on_reflects_to_TagoSwitchHA(fake_server):
     fake_server.seed({L0: {"type": "outlet_onoff", "is_on": False}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, entity = _wrap_ha(device, TagoSwitch, TagoSwitchHA)
@@ -581,7 +582,7 @@ async def test_state_changed_is_on_reflects_to_TagoSwitchHA(fake_server):
 @pytest.mark.asyncio
 async def test_state_changed_is_on_reflects_to_TagoFanHA(fake_server):
     fake_server.seed({L0: {"type": "fan_onoff", "is_on": False}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, entity = _wrap_ha(device, TagoFan, TagoFanHA)
@@ -604,7 +605,7 @@ async def test_state_changed_is_on_reflects_to_TagoFanHA(fake_server):
 @pytest.mark.asyncio
 async def test_state_changed_is_on_reflects_to_TagoLightHA_onoff(fake_server):
     fake_server.seed({L0: {"type": "light_onoff", "is_on": False}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, entity = _wrap_ha(device, TagoLight, TagoLightHA)
@@ -625,12 +626,17 @@ async def test_state_changed_is_on_reflects_to_TagoLightHA_onoff(fake_server):
 # =====================================================================
 
 @pytest.mark.asyncio
-async def test_config_changed_ct_range_updates_ha_bounds(fake_server):
+async def test_config_changed_ct_range_is_frozen_per_d7(fake_server):
+    """Per D7 (config frozen after initial connect), runtime
+    `config_changed` events that try to change the ct_range are
+    received but NOT re-applied. The HA bounds stay at the values
+    discovered on the initial connect; the user must reload the
+    integration to pick up a firmware-side change."""
     fake_server.seed({
         L0: {"type": "light_ww", "brightness": 0, "ct": 0,
              "ct_range": [2700, 6500]},
     })
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, entity = _wrap_ha(device, TagoLight, TagoLightHA)
@@ -642,9 +648,10 @@ async def test_config_changed_ct_range_updates_ha_bounds(fake_server):
             {"evt": "config_changed", "src": L0, "id": L0,
              "type": "light_ww", "ct_range": [2200, 5000]}
         )
-        await _wait_for(lambda: entity._ct_range_min == 2200, timeout=1.0)
-        assert ha.min_color_temp_kelvin == 2200
-        assert ha.max_color_temp_kelvin == 5000
+        # Give the event time to land (and be ignored).
+        await asyncio.sleep(0.1)
+        assert ha.min_color_temp_kelvin == 2700
+        assert ha.max_color_temp_kelvin == 6500
     finally:
         await device.disconnect(timeout=5.0)
 
@@ -656,7 +663,7 @@ async def test_config_changed_ct_range_updates_ha_bounds(fake_server):
 @pytest.mark.asyncio
 async def test_state_changed_fault_surfaces_on_entity(fake_server):
     fake_server.seed({L0: {"type": "light_dimmable", "brightness": 500}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         _, entity = _wrap_ha(device, TagoLight, TagoLightHA)
@@ -681,7 +688,7 @@ async def test_full_roundtrip_dimmable_brightness(fake_server):
     """Drive HA-side command; the fake server's state echo should make the
     HA entity converge on the requested value."""
     fake_server.seed({L0: {"type": "light_dimmable", "brightness": 0}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         from homeassistant.components.light import ATTR_BRIGHTNESS
@@ -700,7 +707,7 @@ async def test_full_roundtrip_dimmable_brightness(fake_server):
 @pytest.mark.asyncio
 async def test_full_roundtrip_outlet_toggle(fake_server):
     fake_server.seed({L0: {"type": "outlet_onoff", "is_on": False}})
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
+    device = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
     await device.connect(timeout=5.0)
     try:
         ha, entity = _wrap_ha(device, TagoSwitch, TagoSwitchHA)

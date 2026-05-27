@@ -58,7 +58,6 @@ async def async_get_config_entry_diagnostics(
             "model_num": device.model_num,
             "firmware_rev": device.firmware_rev,
             "latest_firmware_rev": device.latest_firmware_rev,
-            "name": device._name,
             "location": device.location,
             "available": device.available,
             "is_connected": device.is_connected,
@@ -68,7 +67,7 @@ async def async_get_config_entry_diagnostics(
                     "type": e.type,
                     "name": e.name,
                     "location": e.location,
-                    "tag": getattr(e, "_tag", None),
+                    "tag": e.tag,
                     "fault": list(getattr(e, "fault", []) or []),
                     "is_unused": e.is_unused(),
                 }

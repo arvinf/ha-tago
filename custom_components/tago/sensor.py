@@ -63,8 +63,12 @@ class SignalStrengthSensor(TagoEntityHA, SensorEntity):
 
     @property
     def name(self) -> str:
-        base = self._entity.name or self._entity.unique_id
-        return f"{base} Signal Strength"
+        # `has_entity_name=True` (inherited from TagoEntityHA) makes HA
+        # compose `friendly_name = <device_card_name> + " " + name`. The
+        # device card already carries the parent entity's name, so we
+        # return only the suffix here — returning `"<parent> Signal
+        # Strength"` would double the parent label on the entity row.
+        return "Signal Strength"
 
     @property
     def native_value(self) -> int | None:

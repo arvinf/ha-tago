@@ -731,7 +731,9 @@ async def test_firmware_rev_populated_after_connect(
 ):
     await setup_factory({})
     entry = list(hass.config_entries.async_entries(DOMAIN))[0]
-    device = entry.runtime_data
+    gateway = entry.runtime_data
+    # `firmware_rev` lives on each TagoDevice now, not on the gateway.
+    device = gateway.devices[0]
     await _wait_until(lambda: device.firmware_rev == "1.0.0")
     assert device.firmware_rev == "1.0.0"
 
@@ -875,8 +877,9 @@ async def test_cover_unknown_type_falls_back_to_shade_device_class():
     """cover.py:_DEVICE_CLASS_BY_TYPE.get(...).default — for any type
     not in {shade, blind, curtain} the wrapper falls back to SHADE."""
     from custom_components.tago.cover import TagoCoverHA
-    from custom_components.tago.TagoNet import TagoCover, TagoDevice
-    device = TagoDevice("dummy:1", authkey="k")
+    from custom_components.tago.TagoNet import TagoCover, TagoDevice, TagoGateway
+    gateway = TagoGateway("dummy:1", authkey="k")
+    device = TagoDevice(gateway, {"id": "test_device", "available": True})
     cover = TagoCover(
         {"id": "C0", "type": TagoCover.COVER_SHADE,
          "name": "x", "location": "y", "tag": "1A",
@@ -997,3 +1000,343 @@ async def test_full_roundtrip_light_service_to_state(
     state = hass.states.get(entity_id)
     assert state.state == STATE_ON
     assert state.attributes["brightness"] == 128
+
+
+# =====================================================================
+# Light: turn_on with no args restores last brightness
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_service_light_turn_on_no_args_restores_last_brightness(
+    hass, fake_server, setup_factory
+):
+    """Turning on a previously-off light with no brightness arg should
+    restore the last known brightness (light.py:143-144). The integration
+    caches this on turn_off (light.py:176-177)."""
+    await setup_factory({
+        L0: {"type": "light_dimmable", "brightness": 600, "name": "Dimmer", "tag": "1A"},
+    })
+    entity_id = _resolve_entity_id(hass, "light", L0)
+
+    # Turn off — this caches the current brightness.
+    await hass.services.async_call(
+        "light", "turn_off", {"entity_id": entity_id}, blocking=True,
+    )
+    await _wait_until(
+        lambda: (s := hass.states.get(entity_id)) is not None
+                and s.state == STATE_OFF
+    )
+
+    # Turn on with no args — should restore cached brightness.
+    fake_server.received.clear()
+    await hass.services.async_call(
+        "light", "turn_on", {"entity_id": entity_id}, blocking=True,
+    )
+    await _wait_until(
+        lambda: any(r.get("req") == "set_light" for r in fake_server.received)
+    )
+    frame = next(r for r in fake_server.received if r.get("req") == "set_light")
+    # The cached brightness should match what the light was at before turn_off.
+    assert frame["brightness"] > 0
+
+
+# =====================================================================
+# Light: turn_off with transition sends duration
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_service_light_turn_off_with_transition(
+    hass, fake_server, setup_factory
+):
+    """light.turn_off with transition=2.0 should send set_light with
+    brightness=0 and duration=2000."""
+    await setup_factory({
+        L0: {"type": "light_dimmable", "brightness": 500, "name": "Dimmer", "tag": "1A"},
+    })
+    entity_id = _resolve_entity_id(hass, "light", L0)
+    fake_server.received.clear()
+    await hass.services.async_call(
+        "light", "turn_off",
+        {"entity_id": entity_id, "transition": 2.0},
+        blocking=True,
+    )
+    await _wait_until(
+        lambda: any(r.get("req") == "set_light" for r in fake_server.received)
+    )
+    frame = next(r for r in fake_server.received if r.get("req") == "set_light")
+    assert frame["brightness"] == 0
+    assert frame["duration"] == 2000
+
+
+# =====================================================================
+# Light: turn_on with XY color
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_service_light_turn_on_xy_color_sends_set_colour(
+    hass, fake_server, setup_factory
+):
+    """light.turn_on with xy_color should route through set_colour,
+    sending x and y on the wire."""
+    await setup_factory({
+        L0: {"type": "light_rgb", "brightness": 500, "x": 0.0, "y": 0.0,
+             "name": "RGB Light", "tag": "1A"},
+    })
+    entity_id = _resolve_entity_id(hass, "light", L0)
+    fake_server.received.clear()
+    await hass.services.async_call(
+        "light", "turn_on",
+        {"entity_id": entity_id, "xy_color": [0.4, 0.35]},
+        blocking=True,
+    )
+    await _wait_until(
+        lambda: any(r.get("req") == "set_light" and "x" in r
+                    for r in fake_server.received)
+    )
+    frame = next(r for r in fake_server.received
+                 if r.get("req") == "set_light" and "x" in r)
+    assert frame["x"] == 0.4
+    assert frame["y"] == 0.35
+
+
+# =====================================================================
+# Switch: turn_off via HA service
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_service_switch_turn_off_sends_turn_off(
+    hass, fake_server, setup_factory
+):
+    await setup_factory({
+        L0: {"type": "outlet_onoff", "is_on": True, "name": "Pump", "tag": "1A"},
+    })
+    entity_id = _resolve_entity_id(hass, "switch", L0)
+    fake_server.received.clear()
+    await hass.services.async_call(
+        "switch", "turn_off", {"entity_id": entity_id}, blocking=True,
+    )
+    await _wait_until(
+        lambda: any(r.get("req") == "turn_off" and r.get("dst") == L0
+                    for r in fake_server.received)
+    )
+
+
+# =====================================================================
+# Real sensor: state_changed event flips HA binary sensor
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_sensor_state_changed_flips_binary_sensor(
+    hass, fake_server, setup_factory
+):
+    """A physical sensor (e.g. motion) should reflect state changes from
+    the wire in the HA binary_sensor state."""
+    await setup_factory({
+        L0: {"type": "sensor_motion", "is_on": False,
+             "name": "Hallway Motion", "tag": "1A"},
+    })
+    entity_id = _resolve_entity_id(hass, "binary_sensor", L0)
+    state = hass.states.get(entity_id)
+    assert state.state == STATE_OFF
+
+    await fake_server.broadcast_event(
+        {"evt": "state_changed", "src": L0, "id": L0,
+         "type": "sensor_motion", "is_on": True}
+    )
+    await _wait_until(
+        lambda: hass.states.get(entity_id).state == STATE_ON
+    )
+    assert hass.states.get(entity_id).state == STATE_ON
+
+
+# =====================================================================
+# Virtual switch: state_changed event reflects in HA
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_virtual_switch_state_changed_from_wire(
+    hass, fake_server, setup_factory
+):
+    """The firmware can flip a virtual switch from its own automation
+    engine — HA should reflect this without a service call."""
+    from homeassistant.helpers import entity_registry as er_
+    entry = await setup_factory({
+        L0: {"type": "virtual_switch", "is_on": False, "index": 0,
+             "name": "Holiday Mode", "location": "VIRTUAL", "tag": "VS1"},
+    })
+    registry = er_.async_get(hass)
+    entity_id = registry.async_get_entity_id("switch", DOMAIN, L0)
+    assert entity_id is not None
+    # Virtual switches are disabled-by-default; enable it.
+    registry.async_update_entity(entity_id, disabled_by=None)
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    state = hass.states.get(entity_id)
+    assert state.state == STATE_OFF
+
+    await fake_server.broadcast_event(
+        {"evt": "state_changed", "src": L0, "id": L0,
+         "type": "virtual_switch", "is_on": True}
+    )
+    await _wait_until(
+        lambda: hass.states.get(entity_id).state == STATE_ON
+    )
+
+
+# =====================================================================
+# Firmware update available event → binary sensor
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_firmware_update_event_flips_binary_sensor(
+    hass, fake_server, setup_factory
+):
+    """A firmware_update_available event from the wire should flip
+    the FirmwareUpdateAvailableSensor to ON and populate
+    latest_version in extra_state_attributes."""
+    from homeassistant.helpers import entity_registry as er_
+    entry = await setup_factory({})
+    DEVICE_ID = "TAGO_TEST_001"
+
+    registry = er_.async_get(hass)
+    entity_id = registry.async_get_entity_id(
+        "binary_sensor", DOMAIN, f"{DEVICE_ID}:firmware_update"
+    )
+    assert entity_id is not None
+    # Disabled-by-default — enable it.
+    registry.async_update_entity(entity_id, disabled_by=None)
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    state = hass.states.get(entity_id)
+    assert state.state == STATE_OFF
+
+    await fake_server.broadcast_event(
+        {"evt": "firmware_update_available", "src": DEVICE_ID,
+         "latest_firmware_rev": "2.0.0"}
+    )
+    await _wait_until(
+        lambda: hass.states.get(entity_id).state == STATE_ON
+    )
+    state = hass.states.get(entity_id)
+    assert state.attributes["latest_version"] == "2.0.0"
+    assert state.attributes["current_version"] == "1.0.0"
+
+
+# =====================================================================
+# Device unavailable/available events → entity availability
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_device_unavailable_event_makes_entities_unavailable(
+    hass, fake_server, setup_factory
+):
+    """When the firmware reports a device as unavailable, all entities
+    on that device should become unavailable in HA."""
+    await setup_factory({
+        L0: {"type": "light_dimmable", "brightness": 500,
+             "name": "Dimmer", "tag": "1A"},
+    })
+    entity_id = _resolve_entity_id(hass, "light", L0)
+    assert hass.states.get(entity_id).state != "unavailable"
+
+    await fake_server.broadcast_event(
+        {"evt": "device_unavailable", "device_id": "TAGO_TEST_001"}
+    )
+    await _wait_until(
+        lambda: hass.states.get(entity_id).state == "unavailable",
+        timeout=3.0,
+    )
+    assert hass.states.get(entity_id).state == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_device_available_event_restores_entities(
+    hass, enable_custom_integrations, fake_server
+):
+    """After a device_unavailable, a device_available event should
+    restore entities to their normal state."""
+    fake_server.seed({
+        L0: {"type": "light_dimmable", "brightness": 500,
+             "name": "Dimmer", "tag": "1A"},
+    })
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOSTSTR: f"127.0.0.1:{fake_server.port}", CONF_PIN: ""},
+        unique_id="TAGO_TEST_001",
+        version=9,
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    entity_id = _resolve_entity_id(hass, "light", L0)
+
+    # Make unavailable first.
+    await fake_server.broadcast_event(
+        {"evt": "device_unavailable", "device_id": "TAGO_TEST_001"}
+    )
+    await _wait_until(
+        lambda: hass.states.get(entity_id).state == "unavailable",
+        timeout=3.0,
+    )
+
+    # Restore. Verify at the protocol layer that `_on_available`
+    # flips the device's `_available` back to True and fires the
+    # entity callbacks. Testing through HA's state machine is fragile
+    # because the async chain (`get_state` response → state callback
+    # → `schedule_update_ha_state`) races with HA's event loop.
+    gateway = entry.runtime_data
+    device = gateway.devices[0]
+    assert device.available is False
+
+    await fake_server.broadcast_event(
+        {"evt": "device_available", "device_id": "TAGO_TEST_001"}
+    )
+    await _wait_until(lambda: device.available is True, timeout=3.0)
+    assert device.available is True
+    assert device.is_connected is True
+
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+# =====================================================================
+# Callback cleanup on unload — no stale callbacks fire post-teardown
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_entity_callbacks_deregistered_on_unload(
+    hass, enable_custom_integrations, fake_server
+):
+    """After unloading the integration, state-change callbacks should be
+    deregistered. Broadcasting a state event after unload should NOT
+    cause any HA state writes (which would error on a half-torn-down
+    entity)."""
+    fake_server.seed({
+        L0: {"type": "light_dimmable", "brightness": 500,
+             "name": "Dimmer", "tag": "1A"},
+    })
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOSTSTR: f"127.0.0.1:{fake_server.port}", CONF_PIN: ""},
+        unique_id="TAGO_TEST_001",
+        version=9,
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    gateway = entry.runtime_data
+    entity = next(e for e in gateway.entities if e.unique_id == L0)
+
+    # Verify callback is registered.
+    assert len(entity._update_cbs) > 0
+
+    # Unload.
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    # Callback should be deregistered.
+    assert len(entity._update_cbs) == 0

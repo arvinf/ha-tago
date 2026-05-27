@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 from collections.abc import Awaitable, Callable
 import hashlib
+import hmac
 import json
 import logging
-import math
 import random
+import secrets
 import ssl
 import string
 import time
-import uuid
 
 from websockets.asyncio.client import ClientConnection, connect as wsconnect
+from websockets.exceptions import InvalidStatus
 
 class TagoMessage:
     PROP_DST = 'dst'
@@ -186,22 +188,6 @@ class TagoEntity(TagoBase):
         # dispatch below sees a fully-constructed instance.
         self.handle_state_change(json)
 
-        # if len(self._location.strip()):
-        #     info = DeviceInfo(
-        #         identifiers={
-        #             (
-        #                 DOMAIN,
-        #                 self._location
-        #             )
-        #         },
-        #         name=self._location,
-        #         manufacturer='Tago',
-        #         model="Virtual area device",
-        #     )
-
-        #     info[ATTR_SUGGESTED_AREA] = self._location
-        #     self._attr_device_info = info
-
     @classmethod
     def is_of_type(cls, type: str):
         return (type in cls.types)
@@ -216,7 +202,21 @@ class TagoEntity(TagoBase):
 
     @property
     def location(self) -> str | None:
-        return self._location
+        return self._location if self._location is not None and len(self._location.strip()) else None
+
+    @property
+    def tag(self) -> str | None:
+        """The firmware-issued channel label (e.g. `"1A"`). Used as
+        the cross-reference label on the HA device card
+        (`serial_number` on sub-cards) and in `extra_state_attributes`
+        — visible to the user but not user-overridable, unlike `name`."""
+        return self._tag
+
+    @property
+    def device(self) -> TagoDevice:
+        """The TagoDevice that owns this entity. Public read-only
+        accessor — callers should not reach for `_device` directly."""
+        return self._device
 
     @property
     def dashboard_uri(self):
@@ -239,6 +239,18 @@ class TagoEntity(TagoBase):
         """PROTOCOL_PROPOSALS §P6: most recent RSSI for this entity, or
         None if it isn't on a wireless link / hasn't reported yet."""
         return self._rsi
+
+    @property
+    def is_device_multichannel(self) -> bool:
+        """PROTOCOL_PROPOSALS §P2/§P7 (id-prefix convention): True when
+        the firmware presents this entity as one of several
+        independently-routable channels on the device (the user can
+        rename / regroup it). False when the entity's `id` starts with
+        an underscore — the firmware has locked it to this device as a
+        single-purpose function and the host must attach the HA entity
+        directly to the parent TagoDevice's card with no per-entity
+        sub-card."""
+        return not (self._eid or "").startswith("_")
 
     def is_unused(self) -> bool:
         return self.type == self.VALUE_UNUSED
@@ -325,11 +337,15 @@ class TagoGateway(TagoBase):
     EVT_DEVICE_UNAVAILABLE = 'device_unavailable'
     PROP_DEVICES = 'devices'
     PROP_DEVICE_ID = 'device_id'
-    PROP_ID = 'id'
     PROP_AVAILABLE = 'available'
-    AUTH_HEADER = 'x-tago-auth'
-    AUTH_LEGACY = 'legacy'
-    AUTH_HMAC_TLS_V2 = 'hmac_tls_v2'
+
+    # PROTOCOL.md §2.1: bearer-token authentication. The token is a
+    # PIN-derived HMAC blob delivered as `Authorization: Bearer …` on
+    # the WS upgrade — no post-upgrade handshake. User tier (`0x01`)
+    # is the only tier this integration mints; admin tier is reserved
+    # for the in-house dashboard.
+    _AUTH_TOKEN_VERSION = 1
+    _AUTH_KDF_PREFIX = b"tagoesp-pin-v1"
 
     # How long initial discovery requests wait for a response before
     # giving up. Generous because a slow device can take a beat to
@@ -403,91 +419,68 @@ class TagoGateway(TagoBase):
     def input_event_message(self, msg: TagoMessage) -> None:
         pass
 
-    def _get_server_handshake_headers(self, ws: ClientConnection) -> dict[str, str]:
-        headers: dict[str, str] = {}
-        response = getattr(ws, 'response', None)
-        if response is None:
-            return headers
+    @classmethod
+    def _build_bearer_token(cls, pin: str) -> str:
+        """Construct a PROTOCOL.md §2.1 bearer token from the pairing PIN.
 
-        response_headers = getattr(response, 'headers', None)
-        if response_headers is None:
-            return headers
+        Layout: ver(1) || nonce(16) || ts_ms_be(8) || mac(16) = 41 bytes,
+        then base64url with padding stripped (55 ASCII chars). The MAC
+        is the first 16 bytes of HMAC-SHA256 over the 25-byte prefix,
+        keyed by SHA256(KDF_PREFIX || pin)."""
+        pin_ascii = (pin or "").encode("ascii")
+        key = hashlib.sha256(cls._AUTH_KDF_PREFIX + pin_ascii).digest()
 
+        ver = bytes([cls._AUTH_TOKEN_VERSION])
+        nonce = secrets.token_bytes(16)
+        ts_ms_be = int(time.time() * 1000).to_bytes(8, "big", signed=False)
+        prefix = ver + nonce + ts_ms_be
+
+        mac = hmac.new(key, prefix, hashlib.sha256).digest()[:16]
+        blob = prefix + mac
+        return base64.urlsafe_b64encode(blob).rstrip(b"=").decode("ascii")
+
+    def _auth_headers(self) -> dict[str, str]:
+        """`Authorization: Bearer <token>` headers for the WS upgrade
+        (PROTOCOL.md §2.1, delivery option 1)."""
+        return {"Authorization": f"Bearer {self._build_bearer_token(self._authkey)}"}
+
+    async def connect_and_auth(self, timeout: float | None = None) -> None:
+        """One-shot connectivity + auth probe. Opens the WS (which
+        completes bearer-token auth on the upgrade per PROTOCOL.md
+        §2.1), then closes — no `list_devices`, no per-device
+        discovery, no long-lived connection manager. Doesn't touch
+        `_running`, `_task`, `_startup_future`, or `_pending_responses`,
+        so it's safe to call independently of `connect()`.
+
+        Used by config_flow to validate that a (host, pin) pair can
+        reach an authenticating gateway before committing to creating
+        an entry.
+
+        Raises:
+            PermissionError: token rejected on upgrade (HTTP 401).
+            TimeoutError: probe didn't complete inside `timeout`.
+            OSError / ConnectionError: transport failure.
+        """
+        async def _probe() -> None:
+            ssl_context = await self.get_ssl_context() if self._usessl else None
+            try:
+                async with wsconnect(
+                    uri=self.uri,
+                    additional_headers=self._auth_headers(),
+                    ping_timeout=1, ping_interval=3,
+                    close_timeout=5, ssl=ssl_context,
+                ):
+                    pass
+            except InvalidStatus as err:
+                raise PermissionError("Auth failed") from err
+
+        if timeout is None:
+            await _probe()
+            return
         try:
-            for key, value in response_headers.items():
-                headers[str(key).lower()] = str(value)
-        except Exception as err:
-            logging.debug('Unable to read handshake response headers: %s', err)
-
-        return headers
-
-    def _select_auth_strategy(self, headers: dict[str, str]) -> str:
-        auth_header = headers.get(self.AUTH_HEADER, '')
-        mode = auth_header.split(',')[0].strip().lower() if auth_header else ''
-
-        if not mode:
-            return self.AUTH_LEGACY
-
-        if mode in (self.AUTH_LEGACY, self.AUTH_HMAC_TLS_V2):
-            return mode
-
-        logging.warning(
-            'Unsupported auth mode "%s" from %s, falling back to legacy auth',
-            mode,
-            self._hoststr,
-        )
-        return self.AUTH_LEGACY
-
-    async def _authenticate_legacy(self, ws: ClientConnection) -> None:
-        """PIN-based handshake. The gateway has no addressable id of its
-        own (PROTOCOL_PROPOSALS §P8) — auth just confirms the connection,
-        then `list_devices` does the introduction. Older firmware may
-        still echo serialnum/model/id in the envelope; we ignore them
-        on the gateway side (per-device identity comes from `get_config`
-        on each TagoDevice instead)."""
-        await ws.send('{}')
-        msg = json.loads(await ws.recv())
-
-        status = msg.get('status', 0)
-        if status == 200:
-            return
-
-        if msg.get('nonce') is None:
-            raise PermissionError('No login message from server')
-
-        server_nonce = msg.get('nonce')
-        client_nonce = uuid.uuid4().hex
-        sha256 = hashlib.sha256()
-        sha256.update((client_nonce + self._authkey +
-                       server_nonce).encode('utf-8'))
-        authcode = sha256.hexdigest()
-
-        await ws.send(json.dumps({
-            'nonce': client_nonce,
-            'auth': authcode,
-        }))
-
-        msg = json.loads(await ws.recv())
-        if msg.get('status', 0) != 200:
-            raise PermissionError('Legacy login failed')
-
-    async def _authenticate_hmac_tls_v2(
-        self, ws: ClientConnection, headers: dict[str, str],
-    ) -> None:
-        raise PermissionError(
-            'Device requires auth mode hmac_tls_v2, which is not implemented in this integration version'
-        )
-
-    async def _authenticate_connection(self, ws: ClientConnection) -> None:
-        headers = self._get_server_handshake_headers(ws)
-        auth_mode = self._select_auth_strategy(headers)
-        logging.debug('Selected auth mode "%s" for %s', auth_mode, self._hoststr)
-
-        if auth_mode == self.AUTH_HMAC_TLS_V2:
-            await self._authenticate_hmac_tls_v2(ws, headers)
-            return
-
-        await self._authenticate_legacy(ws)
+            await asyncio.wait_for(_probe(), timeout=timeout)
+        except asyncio.TimeoutError as err:
+            raise TimeoutError("Connection timed out") from err
 
     def _signal_startup_success(self) -> None:
         if self._startup_future and not self._startup_future.done():
@@ -523,6 +516,10 @@ class TagoGateway(TagoBase):
                 await self._task
         self._task = None
         self._startup_future = None
+        # Cancellation can leave `connection_task` with no chance to
+        # run its own `self._ws = None` cleanup. Null it here so
+        # `is_connected` reflects reality.
+        self._ws = None
 
     async def connect(self, timeout: float | None = None) -> None:
         """Ensure the connection manager is running and wait for startup."""
@@ -669,69 +666,104 @@ class TagoGateway(TagoBase):
         and routes them: (1) pending-response futures get resolved, (2)
         gateway-level events (device_available/unavailable) flip the
         right device's availability, (3) anything else is offered to
-        every device for matching against its entities."""
-        async for message in ws:
-            msg = TagoMessage.from_payload(message)
+        every device for matching against its entities.
 
-            # Resolve any pending send_request(responseTimeout=) future
-            # whose ref matches.
-            if msg.ref and msg.ref in self._pending_responses:
-                future = self._pending_responses.pop(msg.ref)
+        On exit (ws closed or loop cancelled) any outstanding
+        `send_request(responseTimeout=)` futures are failed with
+        ConnectionError so callers don't sit blocked on responses that
+        will never arrive."""
+        try:
+            await self._dispatch_loop_body(ws)
+        finally:
+            for future in list(self._pending_responses.values()):
                 if not future.done():
-                    future.set_result(msg)
+                    future.set_exception(ConnectionError("WebSocket closed"))
+            self._pending_responses.clear()
 
-            # Gateway-level events: device_available / device_unavailable
-            # (PROTOCOL_PROPOSALS §P8). `device_id` in the payload picks
-            # which device the event is about — `src` is the gateway.
-            if msg.evt == self.EVT_DEVICE_AVAILABLE:
-                device_id = msg.content.get(self.PROP_DEVICE_ID)
-                device = self.get_device(device_id)
-                if device is not None:
-                    try:
-                        await device._on_available()
-                    except Exception as e:
-                        self._log_exception_throttled(
-                            key='device_available_error',
-                            message='device_available handling error',
-                            err=e,
-                        )
-                continue
-            if msg.evt == self.EVT_DEVICE_UNAVAILABLE:
-                device_id = msg.content.get(self.PROP_DEVICE_ID)
-                device = self.get_device(device_id)
-                if device is not None:
-                    try:
-                        await device._on_unavailable()
-                    except Exception as e:
-                        self._log_exception_throttled(
-                            key='device_unavailable_error',
-                            message='device_unavailable handling error',
-                            err=e,
-                        )
-                continue
+    async def _dispatch_loop_body(self, ws: ClientConnection) -> None:
+        async for message in ws:
+            try:
+                await self._dispatch_one(message)
+            except (json.JSONDecodeError, ValueError) as e:
+                self._log_exception_throttled(
+                    key='dispatch_decode_error',
+                    message='Dropping unparseable frame',
+                    err=e,
+                )
+            except Exception as e:
+                self._log_exception_throttled(
+                    key='dispatch_route_error',
+                    message='Frame routing error',
+                    err=e,
+                )
 
-            # Per-device dispatch.
-            handlers: list[Awaitable[None]] = []
-            for device in self._devices:
+    async def _dispatch_one(self, message: str) -> None:
+        msg = TagoMessage.from_payload(message)
+        # Defensive: a frame whose JSON body isn't an object (an array,
+        # a bare number, a string) has no req/rsp/evt/src structure to
+        # route on. Skip it instead of letting `.get()` propagate.
+        if not isinstance(msg.data, dict):
+            return
+
+        # Resolve any pending send_request(responseTimeout=) future
+        # whose ref matches.
+        if msg.ref and msg.ref in self._pending_responses:
+            future = self._pending_responses.pop(msg.ref)
+            if not future.done():
+                future.set_result(msg)
+
+        # Gateway-level events: device_available / device_unavailable
+        # (PROTOCOL_PROPOSALS §P8). `device_id` in the payload picks
+        # which device the event is about — `src` is the gateway.
+        if msg.evt == self.EVT_DEVICE_AVAILABLE:
+            device_id = msg.content.get(self.PROP_DEVICE_ID)
+            device = self.get_device(device_id)
+            if device is not None:
                 try:
-                    handler = device.handle_message(msg)
-                    if handler is not None:
-                        handlers.append(handler)
+                    await device._on_available()
                 except Exception as e:
                     self._log_exception_throttled(
-                        key='device_message_prepare_error',
-                        message='Device message scheduling error',
+                        key='device_available_error',
+                        message='device_available handling error',
                         err=e,
                     )
-            if handlers:
-                results = await asyncio.gather(*handlers, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, Exception):
-                        self._log_exception_throttled(
-                            key='device_message_error',
-                            message='Device message handling error',
-                            err=result,
-                        )
+            return
+        if msg.evt == self.EVT_DEVICE_UNAVAILABLE:
+            device_id = msg.content.get(self.PROP_DEVICE_ID)
+            device = self.get_device(device_id)
+            if device is not None:
+                try:
+                    await device._on_unavailable()
+                except Exception as e:
+                    self._log_exception_throttled(
+                        key='device_unavailable_error',
+                        message='device_unavailable handling error',
+                        err=e,
+                    )
+            return
+
+        # Per-device dispatch.
+        handlers: list[Awaitable[None]] = []
+        for device in self._devices:
+            try:
+                handler = device.handle_message(msg)
+                if handler is not None:
+                    handlers.append(handler)
+            except Exception as e:
+                self._log_exception_throttled(
+                    key='device_message_prepare_error',
+                    message='Device message scheduling error',
+                    err=e,
+                )
+        if handlers:
+            results = await asyncio.gather(*handlers, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    self._log_exception_throttled(
+                        key='device_message_error',
+                        message='Device message handling error',
+                        err=result,
+                    )
 
     async def connection_task(self) -> None:
         self._running = True
@@ -747,18 +779,13 @@ class TagoGateway(TagoBase):
                 logging.debug(f"connecting to {self.uri}")
                 ssl_context = await self.get_ssl_context() if self._usessl else None
                 async with wsconnect(
-                    uri=self.uri, ping_timeout=1, ping_interval=3,
+                    uri=self.uri,
+                    additional_headers=self._auth_headers(),
+                    ping_timeout=1, ping_interval=3,
                     close_timeout=5, ssl=ssl_context,
                 ) as ws:
                     logging.debug(f"connected to {self.uri}")
                     self._ws = ws
-                    try:
-                        await self._authenticate_connection(ws)
-                    except PermissionError as err:
-                        self._running = False
-                        auth_err = PermissionError('Auth failed')
-                        self._signal_startup_error(auth_err)
-                        raise auth_err from err
 
                     # Kick the dispatch loop off in the background. From
                     # here on, send_request(responseTimeout=...) works —
@@ -794,10 +821,15 @@ class TagoGateway(TagoBase):
                             unavailable_logged = False
 
                         # Notify entities on available devices that the
-                        # transport is up.
+                        # transport is up. Also fire each device's own
+                        # state-change callbacks so per-device HA
+                        # entities (OfflineSensor, FirmwareUpdateAvailableSensor,
+                        # the reboot/identify buttons) re-render their
+                        # availability state.
                         for device in self._devices:
+                            device.update()
                             if device.available:
-                                for entity in device._entities:
+                                for entity in device.entities:
                                     await entity.connection_state_changed(True)
                         self.update()
 
@@ -812,6 +844,19 @@ class TagoGateway(TagoBase):
 
             except asyncio.CancelledError:
                 break
+            except InvalidStatus as err:
+                # Server rejected the WS upgrade. For /api/v1/ws the only
+                # realistic 4xx is 401 (PROTOCOL.md §2.1 token rejection);
+                # surface as PermissionError and stop reconnecting since
+                # the PIN won't get any better on retry.
+                self._running = False
+                auth_err = PermissionError('Auth failed')
+                self._signal_startup_error(auth_err)
+                logging.warning(
+                    "Tago gateway %s rejected auth (HTTP %s)",
+                    self._hoststr,
+                    getattr(getattr(err, 'response', None), 'status_code', '?'),
+                )
             except Exception as e:
                 self._signal_startup_error(e)
                 self._log_exception_throttled(
@@ -821,13 +866,6 @@ class TagoGateway(TagoBase):
                 )
 
             self._ws = None
-
-            # Resolve any in-flight send_request futures so callers
-            # don't hang waiting on responses that will never arrive.
-            for future in list(self._pending_responses.values()):
-                if not future.done():
-                    future.set_exception(ConnectionError("WebSocket closed"))
-            self._pending_responses.clear()
 
             # Log "gateway unavailable" once per outage.
             if not unavailable_logged:
@@ -845,9 +883,14 @@ class TagoGateway(TagoBase):
             # down. (Per-device `_available` stays as-is — that flag
             # tracks device-side state; the gateway's `is_connected`
             # going False makes entities unavailable through entity.is_connected.)
+            # Always fire each device's state-change callbacks so the
+            # per-device HA entities (OfflineSensor, buttons, etc.)
+            # re-evaluate `available` against the now-down gateway.
+            for device in self._devices:
+                device.update()
             if was_connected:
                 for device in self._devices:
-                    for entity in device._entities:
+                    for entity in device.entities:
                         try:
                             await entity.connection_state_changed(False)
                         except Exception as e:
@@ -878,9 +921,10 @@ class TagoDevice(TagoBase):
     PROP_VIRTUAL_SENSORS = 'virtual_sensors'
     PROP_SENSORS = 'sensors'
     # PROTOCOL_PROPOSALS §P5 + §P7: extra fields on the device-level
-    # `get_config` response.
+    # `get_device_info` response. A device-level `name` is intentionally
+    # absent — devices carry only a `location`; user-set names belong
+    # to the entities the device hosts.
     PROP_FIRMWARE_REV = 'firmware_rev'
-    PROP_NAME = 'name'
     PROP_LOCATION = 'location'
     PROP_MODEL_NUM = 'model_num'
     PROP_SERIAL_NUM = 'serial_num'
@@ -905,7 +949,6 @@ class TagoDevice(TagoBase):
         self._serialnum: str | None = None
         self._firmware_rev: str | None = None
         self._latest_firmware_rev: str | None = None
-        self._name: str | None = None
         self._location: str | None = None
         self._entities: list[TagoEntity] = list()
 
@@ -965,7 +1008,11 @@ class TagoDevice(TagoBase):
 
     @property
     def name(self) -> str:
-        return self._name or f'Device {self.unique_id}'
+        """Default display label for the device-registry card. Per the
+        revised PROTOCOL_PROPOSALS §P7 the firmware no longer carries a
+        device-level `name` — user-set names live on entities. The host
+        synthesises a label from the serial so the card is never blank."""
+        return f'Device {self.unique_id}'
 
     @property
     def location(self) -> str | None:
@@ -980,10 +1027,15 @@ class TagoDevice(TagoBase):
 
     async def send_request(
         self, req: str, data: dict | None = None,
+        dst: str | None = None,
         responseTimeout: float | None = None,
     ) -> "None | TagoMessage":
+        """Forward to the parent gateway with `dst` set. Defaults to
+        this device's eid for device-level commands (reboot, identify,
+        get_device_info); entities pass their own eid to target
+        themselves."""
         return await self._gateway.send_request(
-            req=req, dst=self._eid, data=data, responseTimeout=responseTimeout,
+            req=req, dst=dst or self._eid, data=data, responseTimeout=responseTimeout,
         )
 
     async def reboot(self) -> None:
@@ -997,14 +1049,10 @@ class TagoDevice(TagoBase):
         await self.send_request(req=self.REQ_DEVICE_IDENTIFY)
 
     async def _populate_from_gateway(self) -> None:
-        """Initial-discovery helper: pull `list_nodes` + `get_config`
-        for this device. Per D7 the entity list and the device-level
-        config are frozen for the device's lifetime — calling this on
-        a device that's already populated is a no-op, which makes it
-        safe to invoke unconditionally on every (re)connect."""
         """Send `get_device_info` and build the entity list. Per D7 the
-        entity set is frozen for this device's lifetime, so the caller
-        (`_populate_from_gateway`) only runs this once."""
+        entity set and device-level config are frozen for the device's
+        lifetime — calling this on a device that's already populated is
+        a no-op, which makes it safe to invoke on every (re)connect."""
         response = await self.send_request(
             req=self.REQ_GET_DEVICE_INFO,
             responseTimeout=self._DISCOVERY_TIMEOUT_S,
@@ -1036,6 +1084,7 @@ class TagoDevice(TagoBase):
         let them refresh state via their own `get_state`."""
         was_available = self._available
         self._available = True
+        self._latest_firmware_rev = None
         try:
             await self._populate_from_gateway()
         except Exception as e:
@@ -1103,12 +1152,6 @@ class TagoDevice(TagoBase):
         if fw is not None and fw != self._firmware_rev:
             self._firmware_rev = fw
             changed = True
-        name = data.get(self.PROP_NAME)
-        if isinstance(name, str):
-            name = name.strip() or None
-            if name != self._name:
-                self._name = name
-                changed = True
         location = data.get(self.PROP_LOCATION)
         if isinstance(location, str):
             location = location.strip() or None
@@ -1271,7 +1314,6 @@ class TagoLight(TagoEntity):
     PROP_RATE = "rate"
     PROP_BRIGHTNESS = "brightness"
     PROP_BRIGHTNESS_PLUS = "brightness+"
-    PROP_DURATION = "duration"
     PROP_MAX_INTENSITY = "max_intensity"
     PROP_RAMP = "ramp"
     PROP_ELAPSED = "elapsed"
@@ -1373,11 +1415,6 @@ class TagoLight(TagoEntity):
         data = self._brightness_param_parse(brightness, duration, rate)
         await self.send_request(req=self.REQ_SET_LIGHT, data=data)
 
-    async def adjust_brightness(self, brightness: float, duration: float = None, rate: float = None) -> None:
-        """Adjust brightness up or down between -1.0 and 1.0"""
-        data = self._brightness_param_parse(brightness, duration, rate)
-        await self.send_request(req=self.REQ_SET_LIGHT, data=data)
-
     async def set_ct(self, ct: float,  brightness: float = None, duration: float = None, rate: float = None) -> None:
         """Set colour temperature ratio and (optional) brightness to be between 0.0 and 1.0"""
         if ct is None:
@@ -1395,6 +1432,31 @@ class TagoLight(TagoEntity):
         data = self._brightness_param_parse(brightness, duration)
         data[self.PROP_X] = colour[0]
         data[self.PROP_Y] = colour[1]
+        await self.send_request(req=self.REQ_SET_LIGHT, data=data)
+
+    async def set_brightness_relative(self, brightness: float, duration: float = None, rate: float = None) -> None:
+        """Adjust brightness by a signed delta in [-1.0, +1.0] — scaled
+        to [-1000, +1000] and sent as `brightness+`. Firmware applies
+        the delta to the load's current value and clamps to the channel
+        window. Use for IR-remote dim-up / dim-down style commands
+        where there's no absolute target."""
+        if brightness is None:
+            raise ValueError('Brightness must be specified')
+
+        data = self._brightness_param_parse(brightness=None, duration=duration, rate=rate)
+        data[self.PROP_BRIGHTNESS_PLUS] = self.convert_value_from_float(brightness)
+        await self.send_request(req=self.REQ_SET_LIGHT, data=data)
+
+    async def set_cct_relative(self, ct: float, duration: float = None, rate: float = None) -> None:
+        """Adjust colour temperature by a signed delta in [-1.0, +1.0]
+        — scaled to [-1000, +1000] and sent as `ct+`. Firmware applies
+        the delta to the load's current value and clamps to the
+        channel's CT range."""
+        if ct is None:
+            raise ValueError('Colour Temperature must be specified')
+
+        data = self._brightness_param_parse(brightness=None, duration=duration, rate=rate)
+        data[self.PROP_CT_PLUS] = self.convert_value_from_float(ct)
         await self.send_request(req=self.REQ_SET_LIGHT, data=data)
 
     async def stop_ramp(self):
@@ -1457,11 +1519,9 @@ class TagoLight(TagoEntity):
         self._colour_x = data.get(self.PROP_X, self._colour_x)
         self._colour_y = data.get(self.PROP_Y, self._colour_y)
 
-        fault = data.get(self.PROP_FAULT)
-        if fault:
-            self._fault = fault.split(',')
-        else:
-            self._fault = list()
+        if self.PROP_FAULT in data:
+            fault = data[self.PROP_FAULT]
+            self._fault = fault.split(',') if fault else list()
 
         # If a ramp is in progress on the device, animate the value
         # change locally so HA renders smoothly instead of snapping to
@@ -1583,8 +1643,19 @@ class TagoScene(TagoEntity):
     types = [SCENE]
 
     REQ_ACTIVATE = "activate"
+    REQ_DIM_TO = "dim_to"
     EVT_SCENE_ACTIVATED = "scene_activated"
     PROP_LAST_ACTIVATED_TS = "last_activated_ts"
+    PROP_BRIGHTNESS = "brightness"
+    PROP_BRIGHTNESS_PLUS = "brightness+"
+    PROP_DURATION = "duration"
+    PROP_RATE = "rate"
+
+    # Match TagoLight's ramp window (PROTOCOL.md §5
+    # CONFIG_RAMP_DURATION_MIN/MAX); the firmware applies the same clamp
+    # to scene ramps as to load ramps.
+    DURATION_MIN_MS = 300
+    DURATION_MAX_MS = 10000
 
     def __init__(self, json: dict, device: TagoDevice):
         self._last_activated_ts: int = 0
@@ -1621,6 +1692,51 @@ class TagoScene(TagoEntity):
     async def activate(self) -> None:
         await self.send_request(req=self.REQ_ACTIVATE)
 
+    def _dim_to_data(self, brightness_key: str, brightness: float,
+                     duration: float = None, rate: float = None) -> dict:
+        """Build the wire payload for a `dim_to` request. `brightness_key`
+        selects absolute (`brightness`) vs relative-delta (`brightness+`)
+        framing; ramp handling mirrors `TagoLight._brightness_param_parse`."""
+        data = {brightness_key: self.convert_value_from_float(brightness)}
+        if duration is not None:
+            ms = int(round(duration * 1000, 0))
+            if ms <= 0 or ms < self.DURATION_MIN_MS:
+                # Instant change — omit `duration` rather than send a value
+                # the device would silently treat as 0.
+                pass
+            elif ms > self.DURATION_MAX_MS:
+                data[self.PROP_DURATION] = self.DURATION_MAX_MS
+            else:
+                data[self.PROP_DURATION] = ms
+        elif rate is not None:
+            data[self.PROP_RATE] = int(round((rate * 1000), 0))
+        return data
+
+    async def dim_to(self, brightness: float, duration: float = None, rate: float = None) -> None:
+        """Ramp the scene's loads to a final brightness target.
+
+        Mirrors `TagoLight.set_brightness` (PROTOCOL.md §5): `brightness`
+        is a 0.0-1.0 absolute target; `duration` (seconds) or `rate`
+        (per-second) control the blend. If both are passed, `duration`
+        wins — matches the load-level behaviour. Sub-minimum durations
+        are treated as instant by omitting the field on the wire."""
+        if brightness is None:
+            raise ValueError('Brightness must be specified')
+        data = self._dim_to_data(self.PROP_BRIGHTNESS, brightness, duration, rate)
+        await self.send_request(req=self.REQ_DIM_TO, data=data)
+
+    async def dim_to_relative(self, brightness: float, duration: float = None, rate: float = None) -> None:
+        """Adjust the scene's brightness by a signed delta in [-1.0, +1.0].
+
+        Same `dim_to` request as the absolute variant but carries
+        `brightness+` (scaled to [-1000, +1000]) instead of `brightness`.
+        Firmware applies the delta to the current scene output and
+        clamps per-channel."""
+        if brightness is None:
+            raise ValueError('Brightness must be specified')
+        data = self._dim_to_data(self.PROP_BRIGHTNESS_PLUS, brightness, duration, rate)
+        await self.send_request(req=self.REQ_DIM_TO, data=data)
+
     async def handle_event(self, msg: TagoMessage) -> None:
         if msg.is_event(self.EVT_SCENE_ACTIVATED):
             ts = msg.content.get("ts")
@@ -1647,6 +1763,16 @@ class TagoKeypad(TagoEntity):
     `set_led` to the keypad with `key_id` in the payload. Not exposed
     as an HA entity; the integration registers a `device_registry`
     entry per keypad and a `light` entity per key LED."""
+    KEYPAD = "keypad"
+    # The wire-side type is variant-specific (`keypad_4btn`,
+    # `keypad_8btn`, `keypad_modular`, ...); the integration treats
+    # them uniformly. `is_of_type` matches the family prefix so new
+    # variants work without protocol-side coordination.
+    types = [KEYPAD]
+
+    @classmethod
+    def is_of_type(cls, type: str) -> bool:
+        return isinstance(type, str) and type.startswith("keypad_")
 
     PROP_KEYS = "keys"
     PROP_KEY_ID = "key_id"
@@ -1673,20 +1799,19 @@ class TagoKeypad(TagoEntity):
     # fires only when a press didn't drive the change.
     EVT_KEYPAD_LED_CHANGED = "keypad_led_changed"
 
-    @classmethod
-    def is_of_type(cls, type: str) -> bool:
-        # Match any `keypad_*` wire type so new variants (4btn, 8btn,
-        # modular, ...) work without an explicit list update. There is
-        # no `keypad_led` top-level type — LEDs live under keys.
-        return isinstance(type, str) and type.startswith("keypad_")
-
     def __init__(self, json: dict, device: TagoDevice):
         # Per-key LED objects are built from the `keys[]` array now;
         # we initialise the list first so the base init's
         # handle_state_change dispatch (which would land on this class's
         # override if it ever needed to walk keys) sees a real list.
+        # `keys[]` from the wire is a list of dicts per PROTOCOL_PROPOSALS
+        # §P2.2; tolerate a list of bare key-id strings as a convenience
+        # for tests / older firmware that didn't carry LED state.
         self._keys: list[TagoKeypad.TagoKeypadKey] = [
-            TagoKeypad.TagoKeypadKey(self, k)
+            TagoKeypad.TagoKeypadKey(
+                self,
+                k if isinstance(k, dict) else {self.PROP_ID: k},
+            )
             for k in (json.get(self.PROP_KEYS) or [])
         ]
         self._key_event_cbs: list = []
@@ -1733,7 +1858,7 @@ class TagoKeypad(TagoEntity):
 
         if kid is None:
             await super().handle_event(msg)
-
+            
     class TagoKeypadKey(TagoEntity):
         """One key of a keypad — primarily models the per-key LED.
         PROTOCOL_PROPOSALS §P2.
@@ -1747,12 +1872,16 @@ class TagoKeypad(TagoEntity):
         REQ_SET_LED = "set_led"
         REQ_PRESS = "press"
 
-        PROP_ID = "id"
         PROP_IS_ON = "is_on"
         PROP_BRIGHTNESS = "brightness"
         PROP_RGB = "rgb"
         PROP_EFFECT = "effect"
         PROP_DURATION = "duration"
+        # PROTOCOL_PROPOSALS §P2.2: optional per-key marker. Missing or
+        # `true` → the key has an LED and behaves as before. `false`
+        # → the key has no LED at all; the host must not emit `set_led`
+        # for it and must not register a `light` entity for it.
+        PROP_HAS_LED = "has_led"
 
         EFFECT_FLASH = "flash"
 
@@ -1764,14 +1893,39 @@ class TagoKeypad(TagoEntity):
         def __init__(self, keypad: TagoKeypad, json: dict):
             self._keypad = keypad
             self._key_id: str | None = json.get(self.PROP_ID)
+            # Default-true so older firmware (which never emits `has_led`)
+            # keeps its current behavior. Only an explicit `false` opts
+            # the key out of LED handling.
+            self._has_led: bool = json.get(self.PROP_HAS_LED, True) is not False
             # State defaults — the canonical parser below populates them
             # from the discovery payload, the same way it does for
             # runtime state events.
             self._is_on: bool = False
             self._brightness: int = 0
             self._rgb: tuple[int, int, int] = (0, 0, 0)
+            # TagoKeypadKey skips TagoEntity.__init__ (different
+            # constructor signature — keyed by keypad, not device).
+            # Manually initialise the TagoBase/TagoEntity fields that
+            # inherited properties rely on so an accidental `.name` /
+            # `.tag` / `.is_device_multichannel` call returns a safe
+            # default instead of AttributeError. Note: the keypad's
+            # own `_eid` and `_device` aren't set yet (keys are built
+            # before the keypad's super().__init__), so we defer those
+            # via properties instead of caching here.
+            self._eid: str | None = None
+            self._device = None
+            self._type: str = "keypad_key"
+            self._name: str | None = None
+            self._location: str | None = None
+            self._tag: str | None = None
+            self._rsi: int | None = None
+            self._fault: list[str] = []
             self._update_cbs: list = []
             self.handle_state_change(json)
+
+        @property
+        def device(self) -> TagoDevice:
+            return self._keypad._device
 
         @property
         def keypad(self) -> TagoKeypad:
@@ -1790,6 +1944,13 @@ class TagoKeypad(TagoEntity):
         @property
         def key_id(self) -> str | None:
             return self._key_id
+
+        @property
+        def has_led(self) -> bool:
+            """`False` for keys that physically have no LED (PROTOCOL_PROPOSALS
+            §P2.2 `has_led=false`). Such keys still emit press / gesture
+            events but the LED-state fields and `set_led` are no-ops."""
+            return self._has_led
 
         @property
         def is_on(self) -> bool:
@@ -1814,7 +1975,13 @@ class TagoKeypad(TagoEntity):
             state — `keys[]` entries in `list_nodes`, `keypad_led_changed`
             events, and key events that piggy-back LED fields — uses
             the same `(is_on, brightness, rgb)` triplet, so a single
-            parse covers all three (PROTOCOL_PROPOSALS §P2)."""
+            parse covers all three (PROTOCOL_PROPOSALS §P2).
+
+            Keys with `has_led=false` ignore LED fields entirely — even
+            if the firmware accidentally sends them, the host should
+            not surface state for an LED that doesn't exist."""
+            if not self._has_led:
+                return
             if self.PROP_IS_ON in data:
                 self._is_on = bool(data[self.PROP_IS_ON])
             if self.PROP_BRIGHTNESS in data:

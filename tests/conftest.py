@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 
 from custom_components.tago import TagoNet
-from custom_components.tago.TagoNet import TagoDevice
+from custom_components.tago.TagoNet import TagoGateway
 from fakes import FakeWSConnectCM, FakeWSConnection
 from fake_server import FakeServer
 from scenarios import DEVICE_ID, GROUP_ID, load_all
@@ -41,13 +41,27 @@ async def fake_server(socket_enabled):
 
 @pytest_asyncio.fixture
 async def connected_device(fake_server):
-    """Real TagoDevice connected via real WebSocket to the fake firmware."""
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
-    await device.connect(timeout=5.0)
+    """Real TagoDevice (the first device behind a connected TagoGateway)
+    talking to the fake firmware over a real WebSocket."""
+    gateway = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
+    await gateway.connect(timeout=5.0)
     try:
+        device = gateway.devices[0] if gateway.devices else None
         yield device, fake_server
     finally:
-        await device.disconnect(timeout=5.0)
+        await gateway.disconnect(timeout=5.0)
+
+
+@pytest_asyncio.fixture
+async def connected_gateway(fake_server):
+    """Real TagoGateway connected to the fake firmware. Use when the
+    test needs to talk to the gateway itself or to enumerate devices."""
+    gateway = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
+    await gateway.connect(timeout=5.0)
+    try:
+        yield gateway, fake_server
+    finally:
+        await gateway.disconnect(timeout=5.0)
 
 
 @pytest.fixture
@@ -65,11 +79,18 @@ def patch_wsconnect(monkeypatch):
 
 
 @pytest.fixture
-def nodes_payload() -> str:
-    """list_nodes payload using PROTOCOL.md §7a vocabulary."""
+def device_info_payload() -> str:
+    """`get_device_info` payload — device-level fields plus the entity
+    tree under `nodes`. Mirrors PROTOCOL_PROPOSALS §P8 + §P7."""
     return json.dumps(
         {
-            "rsp": "list_nodes",
+            "rsp": "get_device_info",
+            "src": DEVICE_ID,
+            "firmware_rev": "1.0.0",
+            "model_num": "dimac8",
+            "serial_num": DEVICE_ID,
+            "name": "Test Device",
+            "location": "Test Lab",
             "nodes": {
                 "n1": {
                     "loads": [
@@ -121,15 +142,11 @@ def nodes_payload() -> str:
 
 
 @pytest.fixture
-def login_ok_payload() -> str:
-    """Identity envelope per PROTOCOL.md §2 — no `firmware` field; `id` is
-    the opaque device gateway entity ID."""
-    return json.dumps(
-        {
-            "status": 200,
-            "nonce": "Z" * 32,
-            "serialnum": "SN-1234",
-            "model": "TAGO-X",
-            "id": "SN-1234",
-        }
-    )
+def list_devices_payload() -> str:
+    """`list_devices` payload — one available device per
+    PROTOCOL_PROPOSALS §P8."""
+    return json.dumps({
+        "rsp": "list_devices",
+        "src": DEVICE_ID,
+        "devices": [{"id": DEVICE_ID, "available": True}],
+    })

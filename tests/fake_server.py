@@ -1,21 +1,23 @@
-"""In-process fake firmware honoring CLIENT_TEST_GUIDE.md §3.
+"""In-process fake firmware honoring PROTOCOL.md.
 
 State machine that:
-  - Accepts WS on a local port at /api/v1/ws.
-  - Replies to any first frame with a fixed identity envelope.
-  - Pattern-matches subsequent frames by `req` and applies §10–§15 effects
+  - Accepts WS on a local port at /api/v1/ws after validating the
+    `Authorization: Bearer <token>` header per PROTOCOL.md §2.1.
+  - Pattern-matches frames by `req` and applies §10–§15 effects
     to an in-memory entity-state dict seeded from scenario `setup` blocks.
   - Echoes `rsp`, `src` (=`dst` or DEVICE_ID), and `ref` per §3c.
   - Emits `state_changed` / `config_changed` per protocol.
 
-Assumes a protocol-conformant firmware (CLIENT_TEST_GUIDE §5 F-deviations
-are treated as already-fixed). Validation rules (set_light type checks,
-x/y mutual requirement, set_config name/location length) match the
-authoritative C source.
+Assumes a protocol-conformant firmware. Validation rules (set_light
+type checks, x/y mutual requirement, set_config name/location length)
+match the authoritative C source.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import time
 from typing import Any
@@ -26,8 +28,21 @@ from websockets.asyncio.server import serve
 from scenarios import DEVICE_ID, GROUP_ID, MODEL
 
 
+# PROTOCOL.md §2.1: User-tier KDF prefix. The server doesn't accept
+# admin-tier (0x02) tokens from tests — admin paths are exercised by
+# the dashboard, not the HA integration.
+_AUTH_KDF_PREFIX = b"tagoesp-pin-v1"
+_AUTH_TOKEN_VERSION = 0x01
+_AUTH_TIMESTAMP_SKEW_MS = 60_000  # match PROTOCOL.md §2.1 ±60 s skew
+
+
 class FakeServer:
-    def __init__(self) -> None:
+    def __init__(self, pin: str | None = "") -> None:
+        # `pin = None` ⇒ accept any well-formed bearer token (no MAC
+        # check, no PIN derivation). Tests that don't care about auth
+        # specifics can use this to skip the per-test
+        # `fake_server.pin = "…"` sync dance.
+        self._pin: str | None = pin
         self.state: dict[str, dict[str, Any]] = {}
         self.sent: list[dict[str, Any]] = []
         self.received: list[dict[str, Any]] = []
@@ -35,8 +50,19 @@ class FakeServer:
         self._server = None
         self._boot_time = time.monotonic()
 
+    @property
+    def pin(self) -> str | None:
+        return self._pin
+
+    @pin.setter
+    def pin(self, value: str | None) -> None:
+        self._pin = value
+
     async def start(self) -> int:
-        self._server = await serve(self._handle, "127.0.0.1", 0)
+        self._server = await serve(
+            self._handle, "127.0.0.1", 0,
+            process_request=self._authenticate_handshake,
+        )
         sock = next(iter(self._server.sockets))
         return sock.getsockname()[1]
 
@@ -54,6 +80,20 @@ class FakeServer:
         for eid, fields in (setup or {}).items():
             self.state.setdefault(eid, {"id": eid}).update(fields)
 
+    def key_state(self, keypad_id: str, key_id: str) -> dict[str, Any] | None:
+        """Return the seeded state dict for one key under a keypad
+        (PROTOCOL_PROPOSALS §P2.2 — `is_on`/`brightness`/`rgb`), or
+        `None` if the keypad / key isn't seeded. Tests assert on the
+        returned dict to verify post-`set_led` state without digging
+        through the `keys[]` list themselves."""
+        keypad = self.state.get(keypad_id)
+        if keypad is None:
+            return None
+        for k in keypad.get("keys", []) or []:
+            if isinstance(k, dict) and k.get("id") == key_id:
+                return k
+        return None
+
     def reboot(self) -> None:
         self._boot_time = time.monotonic()
 
@@ -66,27 +106,52 @@ class FakeServer:
             except Exception:
                 pass
 
+    # ---------------------------------------------------------------
+    # PROTOCOL.md §2.1 bearer-token validation
+    # ---------------------------------------------------------------
+
+    def _authenticate_handshake(self, connection, request):
+        """Reject the WS upgrade unless `Authorization: Bearer <token>`
+        carries a token that decodes to a valid 41-byte blob whose MAC
+        re-derives from the configured PIN. Mirrors the device-side
+        validator in PROTOCOL.md §2.1."""
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            return connection.respond(401, "missing bearer token\n")
+        token = auth[len("Bearer "):].strip()
+        if not self._validate_bearer_token(token):
+            return connection.respond(401, "invalid bearer token\n")
+        return None
+
+    def _validate_bearer_token(self, token: str) -> bool:
+        try:
+            # base64url, with or without padding.
+            padded = token + "=" * (-len(token) % 4)
+            blob = base64.urlsafe_b64decode(padded.encode("ascii"))
+        except Exception:
+            return False
+        if len(blob) != 41 or blob[0] != _AUTH_TOKEN_VERSION:
+            return False
+
+        ts_ms = int.from_bytes(blob[17:25], "big", signed=False)
+        now_ms = int(time.time() * 1000)
+        if abs(now_ms - ts_ms) > _AUTH_TIMESTAMP_SKEW_MS:
+            return False
+
+        # `pin = None` ⇒ MAC check skipped (accept any well-formed token).
+        if self._pin is None:
+            return True
+
+        key = hashlib.sha256(_AUTH_KDF_PREFIX + self._pin.encode("ascii")).digest()
+        expected = hmac.new(key, blob[:25], hashlib.sha256).digest()[:16]
+        return hmac.compare_digest(blob[25:], expected)
+
     async def _handle(self, ws) -> None:
+        # No post-upgrade auth handshake. The bearer token was already
+        # validated in `_authenticate_handshake` — if we got here the
+        # connection is authenticated.
         self._clients.add(ws)
         try:
-            # Identity exchange — any first frame triggers reply per
-            # PROTOCOL.md §2 (and webserver.c:182-185). No `firmware` field.
-            first = await ws.recv()
-            try:
-                self.received.append(json.loads(first))
-            except Exception:
-                self.received.append({"_raw": first})
-            await ws.send(
-                json.dumps(
-                    {
-                        "status": 200,
-                        "nonce": "Z" * 32,
-                        "serialnum": DEVICE_ID,
-                        "model": MODEL,
-                        "id": DEVICE_ID,
-                    }
-                )
-            )
             async for raw in ws:
                 try:
                     frame = json.loads(raw)
@@ -110,7 +175,34 @@ class FakeServer:
             return
         dst = dst_raw
 
-        if req == "list_nodes":
+        if req == "list_devices":
+            # PROTOCOL_PROPOSALS §P8: gateway enumerates the devices
+            # reachable through it. The fake firmware exposes a single
+            # device (DEVICE_ID) that's always `available`.
+            await self._send(ws, {
+                "rsp": req, "src": DEVICE_ID, "ref": ref,
+                "devices": [{"id": DEVICE_ID, "available": True}],
+            })
+        elif req == "get_device_info":
+            # PROTOCOL_PROPOSALS §P8: per-device initial discovery
+            # returns identity + firmware fields plus the entity tree
+            # (`nodes`) in one shot. The integration consumes both
+            # from the same response.
+            dev_state = self.state.get(DEVICE_ID, {})
+            payload: dict[str, Any] = {
+                "rsp": req, "src": DEVICE_ID, "ref": ref,
+                "firmware_rev": dev_state.get("firmware_rev", "1.0.0"),
+                "model_num": MODEL,
+                "serial_num": DEVICE_ID,
+                "name": dev_state.get("name", ""),
+                "location": dev_state.get("location", ""),
+                "nodes": self._nodes(),
+            }
+            latest = dev_state.get("latest_firmware_rev")
+            if latest is not None:
+                payload["latest_firmware_rev"] = latest
+            await self._send(ws, payload)
+        elif req == "list_nodes":
             await self._send(ws, {"rsp": req, "src": DEVICE_ID, "nodes": self._nodes(), "ref": ref})
         elif req == "get_config" and dst == DEVICE_ID:
             # Allow scenarios to seed `firmware_rev` and the optional
@@ -158,6 +250,9 @@ class FakeServer:
         elif req == "activate":
             # PROTOCOL_PROPOSALS §P1.3 scene activation.
             await self._apply_scene_activate(ws, dst, ref)
+        elif req == "dim_to":
+            # PROTOCOL_PROPOSALS §P1.3 scene dim-to-target.
+            await self._apply_scene_dim_to(ws, dst, frame, ref)
         elif req == "set_led":
             # PROTOCOL_PROPOSALS §P2.5 keypad LED control.
             await self._apply_set_led(ws, dst, frame, ref)
@@ -176,7 +271,6 @@ class FakeServer:
         "keypad_4btn": "keypads",
         "keypad_8btn": "keypads",
         "keypad_modular": "keypads",
-        "keypad_led": "keypad_leds",
         "virtual_switch": "virtual_switches",
         "virtual_sensor": "virtual_sensors",
         # PROTOCOL_PROPOSALS §P4: real sensors.
@@ -193,7 +287,6 @@ class FakeServer:
         loads: list = []
         scenes: list = []
         keypads: list = []
-        keypad_leds: list = []
         virtual_switches: list = []
         virtual_sensors: list = []
         sensors: list = []
@@ -220,12 +313,13 @@ class FakeServer:
             if collection_name == "scenes":
                 scenes.append(entry)
             elif collection_name == "keypads":
-                # `map` doesn't apply; remove the default.
                 entry.pop("map", None)
+                # PROTOCOL_PROPOSALS §P2.2: `keys[]` must be a list of
+                # dicts `{id, is_on, brightness, rgb, ...}`. The seed
+                # is responsible for producing them in that shape —
+                # the legacy "list of strings + separate keypad_led
+                # entity" compat shim was removed.
                 keypads.append(entry)
-            elif collection_name == "keypad_leds":
-                entry.pop("map", None)
-                keypad_leds.append(entry)
             elif collection_name == "virtual_switches":
                 entry.pop("map", None)
                 virtual_switches.append(entry)
@@ -245,8 +339,6 @@ class FakeServer:
             group["scenes"] = scenes
         if keypads:
             group["keypads"] = keypads
-        if keypad_leds:
-            group["keypad_leds"] = keypad_leds
         if virtual_switches:
             group["virtual_switches"] = virtual_switches
         if virtual_sensors:
@@ -265,11 +357,6 @@ class FakeServer:
             # entities (incl. virtual ones and real sensors) expose
             # canonical `is_on`.
             view["is_on"] = st.get("is_on", st.get("brightness", 0) > 0)
-        elif t == "keypad_led":
-            # PROTOCOL_PROPOSALS §P2.5: keypad LED state.
-            view["is_on"] = st.get("is_on", False)
-            view["brightness"] = st.get("brightness", 0)
-            view["rgb"] = st.get("rgb", {"r": 0, "g": 0, "b": 0})
         elif t == "scene":
             view["last_activated_ts"] = st.get("last_activated_ts", 0)
         else:
@@ -313,12 +400,13 @@ class FakeServer:
         if st is None:
             await self._send(ws, {"rsp": "set_light", "src": dst, "status": 500, "ref": ref})
             return
-        # PROTOCOL_PROPOSALS §P2.5: set_light against a keypad_led is
-        # rejected; the LED's only command is `set_led`. PROTOCOL_PROPOSALS
-        # §P4.4: real sensors don't take any write commands either.
+        # PROTOCOL_PROPOSALS §P2.5: set_light against a keypad (or any
+        # of its keys) is rejected — the LED's only command is
+        # `set_led`. PROTOCOL_PROPOSALS §P4.4: real sensors don't take
+        # any write commands either.
         type_str = st.get("type", "")
-        if type_str == "keypad_led" or (
-            isinstance(type_str, str) and type_str.startswith("sensor_")
+        if isinstance(type_str, str) and (
+            type_str.startswith("sensor_") or type_str.startswith("keypad_")
         ):
             await self._send(ws, {"rsp": "set_light", "src": dst, "status": 500, "ref": ref})
             return
@@ -454,16 +542,35 @@ class FakeServer:
             "ts": ts,
         })
 
-    async def _apply_set_led(self, ws, dst: str, frame: dict[str, Any], ref: str | None) -> None:
-        """PROTOCOL_PROPOSALS §P2.5 `set_led`. All fields optional;
-        validates `effect`/`duration` pairing."""
+    async def _apply_scene_dim_to(self, ws, dst: str, frame: dict[str, Any], ref: str | None) -> None:
+        """PROTOCOL_PROPOSALS §P1.3 `dim_to`. Acknowledges the brightness
+        target + optional duration/rate so the integration tests can
+        assert the wire frame was constructed correctly. The firmware's
+        internal recipe is out of scope here."""
         st = self.state.get(dst)
-        if st is None or st.get("type") != "keypad_led":
+        if st is None or st.get("type") != "scene":
+            await self._send(ws, {"rsp": "dim_to", "src": dst, "status": 500, "ref": ref})
+            return
+        await self._send(ws, {"rsp": "dim_to", "src": dst, "status": 200, "ref": ref})
+
+    async def _apply_set_led(self, ws, dst: str, frame: dict[str, Any], ref: str | None) -> None:
+        """PROTOCOL_PROPOSALS §P2.5 `set_led`. `dst` targets the keypad;
+        the body's `key_id` selects which key's LED to drive. Updates
+        the matching entry in the keypad's `keys[]` and emits a
+        `keypad_led_changed` event so the host re-renders."""
+        st = self.state.get(dst)
+        if st is None:
+            await self._send(ws, {"rsp": "set_led", "src": dst, "status": 500, "ref": ref})
+            return
+        type_str = st.get("type", "")
+        if not (isinstance(type_str, str) and type_str.startswith("keypad_")):
             await self._send(ws, {"rsp": "set_led", "src": dst, "status": 500, "ref": ref})
             return
 
         def _is_num(v):
             return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+        key_id = frame.get("key_id")
 
         # Type validation.
         if "is_on" in frame and not isinstance(frame["is_on"], bool):
@@ -493,17 +600,36 @@ class FakeServer:
             await self._send(ws, {"rsp": "set_led", "src": dst, "status": 500, "ref": ref})
             return
 
-        # Apply (we don't actually simulate the flash effect's blink
-        # cycle — we just acknowledge the request and broadcast a
-        # state_changed reflecting any non-effect changes).
+        # Find (or create) the matching key entry in keys[].
+        keys_list = st.setdefault("keys", [])
+        key_entry: dict | None = None
+        for k in keys_list:
+            if isinstance(k, dict) and k.get("id") == key_id:
+                key_entry = k
+                break
+        if key_entry is None and isinstance(key_id, (str, int)):
+            key_entry = {"id": key_id}
+            keys_list.append(key_entry)
+        if key_entry is None:
+            # No key_id and no matching entry — invalid request.
+            await self._send(ws, {"rsp": "set_led", "src": dst, "status": 500, "ref": ref})
+            return
+
+        # Apply.
         if "is_on" in frame:
-            st["is_on"] = bool(frame["is_on"])
+            key_entry["is_on"] = bool(frame["is_on"])
         if "brightness" in frame:
-            st["brightness"] = max(0, min(1000, int(frame["brightness"])))
+            key_entry["brightness"] = max(0, min(1000, int(frame["brightness"])))
         if rgb is not None:
-            st["rgb"] = {"r": int(rgb["r"]), "g": int(rgb["g"]), "b": int(rgb["b"])}
+            key_entry["rgb"] = {"r": int(rgb["r"]), "g": int(rgb["g"]), "b": int(rgb["b"])}
 
         await self._send(ws, {"rsp": "set_led", "src": dst, "status": 200, "ref": ref})
+        # PROTOCOL_PROPOSALS §P2.4: `keypad_led_changed` carries the
+        # key_id so the host can route the new state to the matching key.
         await self.broadcast_event({
-            "evt": "state_changed", "src": dst, **self._state_view(st),
+            "evt": "keypad_led_changed", "src": dst,
+            "keypad_id": dst, "key_id": key_id,
+            "is_on": key_entry.get("is_on", False),
+            "brightness": key_entry.get("brightness", 0),
+            "rgb": key_entry.get("rgb", {"r": 0, "g": 0, "b": 0}),
         })

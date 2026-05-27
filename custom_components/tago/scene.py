@@ -32,7 +32,20 @@ class TagoSceneHA(TagoEntityHA, Scene):
 
     def __init__(self, entity: TagoScene):
         super().__init__(entity)
-        entity.set_on_scene_activated(self._on_scene_activated)
+
+    async def async_added_to_hass(self) -> None:
+        # Match the convention used across the integration: register
+        # callbacks here, when `self.hass` and `self.entity_id` are
+        # guaranteed bound. `_on_scene_activated` calls
+        # `_async_record_activation` and `async_write_ha_state`, both
+        # of which require those — firing them from a callback set in
+        # `__init__` could land on a half-bound entity.
+        await super().async_added_to_hass()
+        self._entity.set_on_scene_activated(self._on_scene_activated)
+
+    async def async_will_remove_from_hass(self) -> None:
+        self._entity.remove_on_scene_activated(self._on_scene_activated)
+        await super().async_will_remove_from_hass()
 
     async def async_activate(self, **kwargs: Any) -> None:
         await self._entity.activate()

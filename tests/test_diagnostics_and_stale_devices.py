@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.tago.const import (
@@ -31,7 +32,7 @@ async def _setup(hass, fake_server, seed: dict) -> MockConfigEntry:
     fake_server.seed(seed)
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOSTSTR: f"127.0.0.1:{fake_server.port}", CONF_PIN: "test-pin"},
+        data={CONF_HOSTSTR: f"127.0.0.1:{fake_server.port}", CONF_PIN: ""},
         unique_id="TAGO_TEST_001",
         version=9,
     )
@@ -63,19 +64,23 @@ async def test_diagnostics_contains_entry_device_and_entity_fields(
     assert payload["entry"]["version"] == 9
     assert "data" in payload["entry"]
 
-    # Device block
-    assert payload["device"]["serial_num"] == "TAGO_TEST_001"
-    assert payload["device"]["model_num"] == "dimac8"
-    assert payload["device"]["firmware_rev"] == "1.0.0"
-    assert payload["device"]["is_connected"] is True
+    # Gateway block
+    assert payload["gateway"]["is_connected"] is True
+    assert payload["gateway"]["device_count"] >= 1
 
-    # Entities — both loads should be listed
-    ids = {e["id"] for e in payload["entities"]}
+    # Devices block — exactly one device, with its entities nested
+    assert len(payload["devices"]) == 1
+    dev = payload["devices"][0]
+    assert dev["serial_num"] == "TAGO_TEST_001"
+    assert dev["model_num"] == "dimac8"
+    assert dev["firmware_rev"] == "1.0.0"
+    assert dev["is_connected"] is True
+
+    ids = {e["id"] for e in dev["entities"]}
     assert L0 in ids
     assert L1 in ids
 
-    # Per-entity shape
-    entity_l0 = next(e for e in payload["entities"] if e["id"] == L0)
+    entity_l0 = next(e for e in dev["entities"] if e["id"] == L0)
     assert entity_l0["type"] == "light_dimmable"
     assert entity_l0["name"] == "Kitchen Light"
     assert entity_l0["is_unused"] is False
@@ -88,16 +93,30 @@ async def test_diagnostics_contains_entry_device_and_entity_fields(
 async def test_diagnostics_redacts_pin_and_host_and_api_key_fields(
     hass, enable_custom_integrations, fake_server
 ):
-    entry = await _setup(hass, fake_server, {})
+    """A non-empty PIN must be redacted to `**REDACTED**` (HA's
+    `async_redact_data` is a no-op on empty/None values, so the
+    fixture has to use a real secret to exercise the redaction)."""
+    # Configure the fake server with the same PIN so auth succeeds.
+    fake_server.pin = "secret-pin"
+    fake_server.seed({})
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOSTSTR: f"127.0.0.1:{fake_server.port}", CONF_PIN: "secret-pin"},
+        unique_id="TAGO_TEST_001",
+        version=9,
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
     payload = await async_get_config_entry_diagnostics(hass, entry)
 
-    # PIN must not leak — we set it to "test-pin" in _setup.
-    data_blob = str(payload["entry"]["data"])
-    assert "test-pin" not in data_blob
+    # PIN field must be redacted; the literal value must not leak.
     assert payload["entry"]["data"][CONF_PIN] == "**REDACTED**"
+    assert "secret-pin" not in str(payload["entry"]["data"])
 
-    # Host is redacted too (defensive — might contain a public IP).
-    assert payload["device"]["host"] == "**REDACTED**"
+    # Host on the gateway block is redacted too (defensive — might be public).
+    assert payload["gateway"]["host"] == "**REDACTED**"
 
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
@@ -122,8 +141,8 @@ async def test_diagnostics_handles_entry_with_no_runtime_data(
     payload = await async_get_config_entry_diagnostics(hass, entry)
 
     assert payload["entry"]["unique_id"] == "TAGO_X"
-    assert payload["device"] is None
-    assert payload["entities"] == []
+    assert payload["gateway"] is None
+    assert payload["devices"] == []
     # PIN still redacted.
     assert payload["entry"]["data"][CONF_PIN] == "**REDACTED**"
 
@@ -255,6 +274,148 @@ async def test_stale_device_registry_does_not_touch_other_entries(
     assert registry.async_get_device(
         identifiers={("other_integration", "external-device-1")}
     ) is not None
+
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+@pytest.mark.asyncio
+async def test_reload_removes_entity_when_load_no_longer_reported_by_firmware(
+    hass, enable_custom_integrations, fake_server
+):
+    """Regression: an HA entity backed by a load the firmware stops
+    reporting (load deleted on the device side, or the whole device
+    factory-reset between sessions) is removed from BOTH the
+    device_registry AND the entity_registry on the next reload.
+
+    Flow exercised:
+      1. Setup with L0 present  → entity-registry row + device-registry row created.
+      2. Firmware drops L0 (simulated by removing it from fake_server.state).
+      3. `async_reload(entry)` re-runs setup; `list_nodes` no longer mentions L0.
+      4. `_async_prune_stale_devices` removes L0's device-registry row.
+      5. HA's entity_registry listens for device removals and cascades —
+         L0's entity-registry row is removed automatically.
+    """
+    fake_server.seed({
+        L0: {"type": "light_dimmable", "brightness": 500,
+             "name": "Kitchen Light", "tag": "1A"},
+    })
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOSTSTR: f"127.0.0.1:{fake_server.port}", CONF_PIN: ""},
+        unique_id="TAGO_TEST_001",
+        version=9,
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    dev_registry = dr.async_get(hass)
+    ent_registry = er.async_get(hass)
+
+    # Sanity — L0 is in both registries after initial setup.
+    initial_device = dev_registry.async_get_device(identifiers={(DOMAIN, L0)})
+    assert initial_device is not None, (
+        "expected device_registry row for L0 after initial setup"
+    )
+    initial_entities = [
+        e for e in ent_registry.entities.values()
+        if e.config_entry_id == entry.entry_id and e.device_id == initial_device.id
+    ]
+    assert initial_entities, (
+        "expected at least one entity_registry row linked to L0 device card"
+    )
+
+    # Firmware no longer reports L0 — load was deleted device-side.
+    del fake_server.state[L0]
+
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    # After reload: device_registry row for L0 is gone (pruned)…
+    assert dev_registry.async_get_device(identifiers={(DOMAIN, L0)}) is None, (
+        "device_registry row for L0 should be pruned after reload"
+    )
+    # …and so are the entity_registry rows that pointed at it (cascade).
+    orphaned = [
+        e for e in ent_registry.entities.values()
+        if e.config_entry_id == entry.entry_id and e.device_id == initial_device.id
+    ]
+    assert orphaned == [], (
+        f"entity_registry rows survived device removal: {orphaned}"
+    )
+
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+@pytest.mark.asyncio
+async def test_reload_rehydrates_existing_entity_registry_rows_for_same_unique_ids(
+    hass, enable_custom_integrations, fake_server
+):
+    """Regression: when a reload (or a same-domain code swap) re-creates
+    entities that report the same `unique_id`, HA's entity_registry
+    rehydrates the **existing** row rather than minting a new one.
+
+    This is the contract that makes user customizations (custom name,
+    area, enabled/disabled) survive both:
+      - vanilla `hass.config_entries.async_reload(entry_id)`, and
+      - swapping the integration codebase out for a different one
+        registered under the same DOMAIN.
+
+    Verified by user-customizing the entity between setup and reload
+    and asserting `entity_id` + the user's custom `name` (the
+    user-set-name field is the one preserved on rehydrate; the
+    integration-supplied `original_name` is updated freely)."""
+    fake_server.seed({
+        L0: {"type": "light_dimmable", "brightness": 500,
+             "name": "Kitchen Light", "tag": "1A"},
+    })
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOSTSTR: f"127.0.0.1:{fake_server.port}", CONF_PIN: ""},
+        unique_id="TAGO_TEST_001",
+        version=9,
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    ent_registry = er.async_get(hass)
+    matching = [
+        e for e in ent_registry.entities.values()
+        if e.config_entry_id == entry.entry_id and e.unique_id == L0
+    ]
+    assert len(matching) == 1, (
+        f"expected exactly one entity_registry row for L0; got {matching}"
+    )
+    original_row = matching[0]
+    original_entity_id = original_row.entity_id
+    original_registry_id = original_row.id  # internal UUID
+
+    # User customizes: override the name. This is the field HA
+    # preserves across rehydrate (unlike `original_name`, which the
+    # integration is allowed to overwrite on every refresh).
+    ent_registry.async_update_entity(original_entity_id, name="My Custom Name")
+
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    rehydrated = [
+        e for e in ent_registry.entities.values()
+        if e.config_entry_id == entry.entry_id and e.unique_id == L0
+    ]
+    assert len(rehydrated) == 1, (
+        f"reload should rehydrate, not duplicate; got {rehydrated}"
+    )
+    row = rehydrated[0]
+
+    # entity_id and internal registry-row id unchanged → same row, not
+    # a freshly-minted one.
+    assert row.entity_id == original_entity_id
+    assert row.id == original_registry_id
+    # User customization survived rehydrate.
+    assert row.name == "My Custom Name"
 
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()

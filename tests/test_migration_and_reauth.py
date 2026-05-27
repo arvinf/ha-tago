@@ -41,6 +41,7 @@ async def test_migration_v8_to_v9_renames_authkey_to_pin(
 ):
     """A v8 entry with `authkey="old-api-key"` migrates to v9 with
     `pin="old-api-key"` (value carried over verbatim, key renamed)."""
+    fake_server.pin = "old-api-key"
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={CONF_HOSTSTR: f"127.0.0.1:{fake_server.port}",
@@ -125,7 +126,7 @@ async def test_setup_entry_raises_auth_failed_when_device_connect_raises_permiss
     entry.add_to_hass(hass)
 
     with patch(
-        "custom_components.tago.TagoDevice.connect",
+        "custom_components.tago.TagoGateway.connect",
         side_effect=PermissionError("bad PIN"),
     ):
         result = await hass.config_entries.async_setup(entry.entry_id)
@@ -148,6 +149,9 @@ async def test_reauth_flow_updates_pin_and_reloads_entry(
 ):
     """User completes reauth with the correct PIN → entry data is updated
     and the entry reloads successfully."""
+    # Sync the fake server's expected PIN with what the user is about
+    # to enter, so the bearer-token validation passes.
+    fake_server.pin = "new-correct-pin"
     fake_server.seed({})
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -171,7 +175,6 @@ async def test_reauth_flow_updates_pin_and_reloads_entry(
     assert result["type"] == "form"
     assert result["step_id"] == "reauth_confirm"
 
-    # Submit the new PIN; the fake server accepts anything for PIN today.
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {CONF_PIN: "new-correct-pin"},
     )
@@ -207,7 +210,7 @@ async def test_reauth_flow_invalid_auth_shows_error(
     )
 
     with patch(
-        "custom_components.tago.config_flow.TagoDevice.connect",
+        "custom_components.tago.config_flow.TagoGateway.connect_and_auth",
         side_effect=PermissionError("still bad"),
     ):
         result = await hass.config_entries.flow.async_configure(
@@ -241,55 +244,10 @@ async def test_reauth_flow_aborts_if_entry_id_no_longer_exists(
     assert result["reason"] == "unknown"
 
 
-@pytest.mark.asyncio
-async def test_reauth_disconnect_cleanup_exception_is_swallowed(
-    hass, enable_custom_integrations, fake_server, socket_enabled, caplog
-):
-    """A disconnect() that raises during the reauth finally-block must not
-    propagate — it logs at debug level (config_flow.py:137-138).
-
-    We exercise the failure path (auth fails, so no entry reload happens)
-    so the test doesn't have to manage the lifecycle of a successfully
-    reloaded entry that would otherwise leak a task."""
-    import logging
-
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={CONF_HOSTSTR: f"127.0.0.1:{fake_server.port}", CONF_PIN: "stale"},
-        unique_id="TAGO_TEST_001",
-        version=9,
-    )
-    entry.add_to_hass(hass)
-
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN,
-        context={
-            "source": SOURCE_REAUTH,
-            "entry_id": entry.entry_id,
-            "unique_id": entry.unique_id,
-        },
-        data=entry.data,
-    )
-
-    async def _raising_disconnect(self, timeout: float = 0):
-        raise RuntimeError("disconnect failed unexpectedly")
-
-    with patch(
-        "custom_components.tago.config_flow.TagoDevice.connect",
-        side_effect=PermissionError("still bad"),
-    ), patch(
-        "custom_components.tago.config_flow.TagoDevice.disconnect",
-        new=_raising_disconnect,
-    ), caplog.at_level(logging.DEBUG):
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], {CONF_PIN: "still-wrong"},
-        )
-
-    # Auth failed → form re-renders, no reload triggered. The disconnect
-    # exception in the finally-block was caught and logged.
-    assert result["type"] == "form"
-    assert result["errors"]["base"] == "invalid_auth"
-    assert any("Connection cleanup failed" in r.message for r in caplog.records)
+# Removed: `test_reauth_disconnect_cleanup_exception_is_swallowed`.
+# The bearer-auth probe in `connect_and_auth` opens-and-closes the WS
+# via `async with` — there's no separate `disconnect()` call in the
+# config flow's finally-block to fail.
 
 
 # =====================================================================
@@ -302,6 +260,9 @@ async def test_reconfigure_flow_updates_entry_and_reloads(
 ):
     """User completes reconfigure with valid host + PIN → entry data is
     updated and the entry reloads against the new endpoint."""
+    # Sync fake_server's expected PIN with each value the test will
+    # present (both the stale and the new one).
+    fake_server.pin = "old"
     fake_server.seed({})
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -321,8 +282,9 @@ async def test_reconfigure_flow_updates_entry_and_reloads(
     assert result["type"] == "form"
     assert result["step_id"] == "reconfigure"
 
-    # Submit with the same host (fake_server already running there) +
-    # new PIN. Fake firmware accepts any PIN.
+    # User submits a new PIN — sync the fake server's expected PIN to
+    # match so the bearer-token probe succeeds.
+    fake_server.pin = "new-pin"
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         {CONF_HOSTSTR: f"127.0.0.1:{fake_server.port}", CONF_PIN: "new-pin"},
@@ -341,6 +303,7 @@ async def test_reconfigure_flow_updates_entry_and_reloads(
 async def test_reconfigure_flow_invalid_auth_shows_error(
     hass, enable_custom_integrations, fake_server, socket_enabled
 ):
+    fake_server.pin = "old"
     fake_server.seed({})
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -359,7 +322,7 @@ async def test_reconfigure_flow_invalid_auth_shows_error(
     )
 
     with patch(
-        "custom_components.tago.config_flow.TagoDevice.connect",
+        "custom_components.tago.config_flow.TagoGateway.connect_and_auth",
         side_effect=PermissionError("bad pin"),
     ):
         result = await hass.config_entries.flow.async_configure(
@@ -380,6 +343,7 @@ async def test_reconfigure_flow_invalid_auth_shows_error(
 async def test_reconfigure_flow_cannot_connect_shows_error(
     hass, enable_custom_integrations, fake_server, socket_enabled
 ):
+    fake_server.pin = "p"
     fake_server.seed({})
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -398,7 +362,7 @@ async def test_reconfigure_flow_cannot_connect_shows_error(
     )
 
     with patch(
-        "custom_components.tago.config_flow.TagoDevice.connect",
+        "custom_components.tago.config_flow.TagoGateway.connect_and_auth",
         side_effect=OSError("no route"),
     ):
         result = await hass.config_entries.flow.async_configure(
@@ -413,102 +377,13 @@ async def test_reconfigure_flow_cannot_connect_shows_error(
     await hass.async_block_till_done()
 
 
-@pytest.mark.asyncio
-async def test_reconfigure_flow_wrong_device_aborts(
-    hass, enable_custom_integrations, fake_server, monkeypatch
-):
-    """If the user points reconfigure at a different physical Tago (a
-    different serial_num), abort — the entry's unique_id binds it to a
-    specific device."""
-    fake_server.seed({})
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={CONF_HOSTSTR: f"127.0.0.1:{fake_server.port}", CONF_PIN: "p"},
-        unique_id="TAGO_TEST_001",
-        version=9,
-    )
-    entry.add_to_hass(hass)
-    assert await hass.config_entries.async_setup(entry.entry_id)
-    await hass.async_block_till_done()
-
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN,
-        context={"source": "reconfigure", "entry_id": entry.entry_id},
-        data=None,
-    )
-
-    # Patch TagoDevice so the test fake reports a different serial_num.
-    from custom_components.tago.TagoNet import TagoDevice as _Real
-
-    class _DifferentSerial(_Real):
-        @property
-        def serial_num(self):
-            return "TAGO_DIFFERENT_001"
-
-    monkeypatch.setattr(
-        "custom_components.tago.config_flow.TagoDevice", _DifferentSerial,
-    )
-
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"],
-        {CONF_HOSTSTR: f"127.0.0.1:{fake_server.port}", CONF_PIN: "p"},
-    )
-
-    assert result["type"] == "abort"
-    assert result["reason"] == "wrong_device"
-
-    await hass.config_entries.async_unload(entry.entry_id)
-    await hass.async_block_till_done()
-
-
-@pytest.mark.asyncio
-async def test_reconfigure_flow_swallows_disconnect_cleanup_exception(
-    hass, enable_custom_integrations, fake_server, socket_enabled, caplog
-):
-    """An exception in the reconfigure finally-block (device.disconnect)
-    must not propagate — log at debug and continue (config_flow.py:132-133)."""
-    import logging
-
-    fake_server.seed({})
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={CONF_HOSTSTR: f"127.0.0.1:{fake_server.port}", CONF_PIN: "p"},
-        unique_id="TAGO_TEST_001",
-        version=9,
-    )
-    entry.add_to_hass(hass)
-    assert await hass.config_entries.async_setup(entry.entry_id)
-    await hass.async_block_till_done()
-
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN,
-        context={"source": "reconfigure", "entry_id": entry.entry_id},
-        data=None,
-    )
-
-    async def _raising_disconnect(self, timeout: float = 0):
-        raise RuntimeError("disconnect failed")
-
-    # Combine with PermissionError on connect so the flow takes the
-    # failure branch — that way no reload runs and we don't leak tasks.
-    with patch(
-        "custom_components.tago.config_flow.TagoDevice.connect",
-        side_effect=PermissionError("bad"),
-    ), patch(
-        "custom_components.tago.config_flow.TagoDevice.disconnect",
-        new=_raising_disconnect,
-    ), caplog.at_level(logging.DEBUG):
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"],
-            {CONF_HOSTSTR: f"127.0.0.1:{fake_server.port}", CONF_PIN: "wrong"},
-        )
-
-    assert result["type"] == "form"
-    assert result["errors"]["base"] == "invalid_auth"
-    assert any("Connection cleanup failed" in r.message for r in caplog.records)
-
-    await hass.config_entries.async_unload(entry.entry_id)
-    await hass.async_block_till_done()
+# Removed:
+# - `test_reconfigure_flow_wrong_device_aborts`. The probe-only config
+#   flow (PROTOCOL.md §2.1) no longer enumerates devices, so it can't
+#   detect a wrong-device repoint. The check was dropped intentionally.
+# - `test_reconfigure_flow_swallows_disconnect_cleanup_exception`. The
+#   bearer-token probe in `connect_and_auth` uses `async with` for WS
+#   teardown — there's no separate `disconnect()` call.
 
 
 @pytest.mark.asyncio
@@ -550,7 +425,7 @@ async def test_setup_entry_permission_error_has_translation_metadata(
     from custom_components.tago import async_setup_entry as _setup_entry
 
     with patch(
-        "custom_components.tago.TagoDevice.connect",
+        "custom_components.tago.TagoGateway.connect",
         side_effect=PermissionError("bad"),
     ):
         try:
@@ -586,7 +461,7 @@ async def test_setup_entry_connection_error_has_translation_metadata(
     from custom_components.tago import async_setup_entry as _setup_entry
 
     with patch(
-        "custom_components.tago.TagoDevice.connect",
+        "custom_components.tago.TagoGateway.connect",
         side_effect=OSError("network down"),
     ):
         try:
@@ -625,7 +500,7 @@ async def test_reauth_flow_cannot_connect_shows_error(
     )
 
     with patch(
-        "custom_components.tago.config_flow.TagoDevice.connect",
+        "custom_components.tago.config_flow.TagoGateway.connect_and_auth",
         side_effect=OSError("no route to host"),
     ):
         result = await hass.config_entries.flow.async_configure(

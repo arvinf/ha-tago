@@ -28,9 +28,19 @@ from custom_components.tago.const import (
     DOMAIN,
     MIN_FIRMWARE_VERSION,
 )
-from custom_components.tago.TagoNet import TagoDevice
+from custom_components.tago.TagoNet import TagoDevice, TagoGateway
 
 L0 = "TAGO_TEST_001L1_0"
+DEVICE_ID = "TAGO_TEST_001"
+
+
+def _make_device(host: str = "dummy:1", firmware_rev: str | None = None) -> TagoDevice:
+    """A bare TagoDevice for unit tests of `_async_check_firmware_repair`."""
+    gateway = TagoGateway(host, authkey="k")
+    device = TagoDevice(gateway, {"id": "test_device", "available": True})
+    if firmware_rev is not None:
+        device._firmware_rev = firmware_rev
+    return device
 
 
 # =====================================================================
@@ -58,31 +68,9 @@ def test_parse_version_returns_none_on_garbage():
 async def test_repair_issue_created_when_firmware_below_minimum(
     hass, enable_custom_integrations, fake_server
 ):
-    """Patch the fake firmware's get_config to report a low firmware
-    version; integration setup should raise the issue."""
-    # Patch fake_server's get_config response to return an old firmware.
-    original_dispatch = fake_server._dispatch
-
-    async def _patched_dispatch(ws, frame):
-        if frame.get("req") == "get_config" and frame.get("dst") in (
-            None, "TAGO_TEST_001",
-        ):
-            import json
-            ref = frame.get("ref")
-            await ws.send(json.dumps({
-                "rsp": "get_config", "src": "TAGO_TEST_001",
-                "firmware_rev": "0.9.0", "model_num": "dimac8",
-                "serial_number": "TAGO_TEST_001",
-                "api_key": "x" * 32, "loads": ["TAGO_TEST_001L1"],
-                **({"ref": ref} if ref else {}),
-            }))
-            fake_server.sent.append({"firmware_rev": "0.9.0"})
-            return
-        await original_dispatch(ws, frame)
-
-    fake_server._dispatch = _patched_dispatch
-
-    fake_server.seed({})
+    """Seed the fake firmware to report a low firmware version;
+    integration setup should raise the firmware-too-old issue."""
+    fake_server.seed({DEVICE_ID: {"firmware_rev": "0.9.0"}})
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={CONF_HOSTSTR: f"127.0.0.1:{fake_server.port}", CONF_PIN: ""},
@@ -94,7 +82,7 @@ async def test_repair_issue_created_when_firmware_below_minimum(
     await hass.async_block_till_done()
 
     issues = ir.async_get(hass)
-    issue = issues.async_get_issue(DOMAIN, f"firmware_too_old_{entry.entry_id}")
+    issue = issues.async_get_issue(DOMAIN, f"firmware_too_old_{entry.entry_id}_{DEVICE_ID}")
     assert issue is not None
     assert issue.severity == ir.IssueSeverity.WARNING
     assert issue.is_fixable is False
@@ -106,7 +94,7 @@ async def test_repair_issue_created_when_firmware_below_minimum(
 
     # Unload should clear the issue.
     assert issues.async_get_issue(
-        DOMAIN, f"firmware_too_old_{entry.entry_id}"
+        DOMAIN, f"firmware_too_old_{entry.entry_id}_{DEVICE_ID}"
     ) is None
 
 
@@ -129,7 +117,7 @@ async def test_repair_issue_not_created_when_firmware_meets_minimum(
 
     issues = ir.async_get(hass)
     assert issues.async_get_issue(
-        DOMAIN, f"firmware_too_old_{entry.entry_id}"
+        DOMAIN, f"firmware_too_old_{entry.entry_id}_{DEVICE_ID}"
     ) is None
 
     await hass.config_entries.async_unload(entry.entry_id)
@@ -152,27 +140,25 @@ async def test_firmware_check_unit_clears_stale_issue_when_now_compliant(
     entry.add_to_hass(hass)
     issues = ir.async_get(hass)
 
-    # Pre-create a stale issue.
+    # Build a device with a compliant firmware and pre-create a stale
+    # issue keyed to its unique_id.
+    device = _make_device()
+    device._firmware_rev = "1.5.0"
+    device._serialnum = "TAGO_TEST_001"
+    issue_id = f"firmware_too_old_{entry.entry_id}_{device.unique_id}"
+
     ir.async_create_issue(
-        hass, DOMAIN, f"firmware_too_old_{entry.entry_id}",
+        hass, DOMAIN, issue_id,
         is_fixable=False, severity=ir.IssueSeverity.WARNING,
         translation_key="firmware_too_old",
         translation_placeholders={"current": "0.9.0", "minimum": "1.0.0",
                                   "serial": "TAGO_TEST_001"},
     )
-    assert issues.async_get_issue(
-        DOMAIN, f"firmware_too_old_{entry.entry_id}"
-    ) is not None
+    assert issues.async_get_issue(DOMAIN, issue_id) is not None
 
-    # Build a device with a compliant firmware and run the check.
-    device = TagoDevice("dummy:1", authkey="")
-    device._firmware_rev = "1.5.0"
-    device._serialnum = "TAGO_TEST_001"
     _async_check_firmware_repair(hass, entry, device)
 
-    assert issues.async_get_issue(
-        DOMAIN, f"firmware_too_old_{entry.entry_id}"
-    ) is None
+    assert issues.async_get_issue(DOMAIN, issue_id) is None
 
 
 @pytest.mark.asyncio
@@ -189,12 +175,12 @@ async def test_firmware_check_skips_when_firmware_rev_is_none(
     )
     entry.add_to_hass(hass)
 
-    device = TagoDevice("dummy:1", authkey="")
+    device = _make_device()
     # firmware_rev is None by default.
     _async_check_firmware_repair(hass, entry, device)
 
     assert ir.async_get(hass).async_get_issue(
-        DOMAIN, f"firmware_too_old_{entry.entry_id}"
+        DOMAIN, f"firmware_too_old_{entry.entry_id}_{DEVICE_ID}"
     ) is None
 
 
@@ -211,12 +197,12 @@ async def test_firmware_check_skips_on_unparseable_version(
     )
     entry.add_to_hass(hass)
 
-    device = TagoDevice("dummy:1", authkey="")
+    device = _make_device()
     device._firmware_rev = "build-abc-xyz"
     _async_check_firmware_repair(hass, entry, device)
 
     assert ir.async_get(hass).async_get_issue(
-        DOMAIN, f"firmware_too_old_{entry.entry_id}"
+        DOMAIN, f"firmware_too_old_{entry.entry_id}_{DEVICE_ID}"
     ) is None
 
 

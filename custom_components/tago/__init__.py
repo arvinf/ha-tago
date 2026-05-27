@@ -42,20 +42,31 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def generate_device_info(device: TagoDevice) -> DeviceInfo:
+    # PROTOCOL_PROPOSALS §P9 D8: when a TagoDevice carries a device-locked
+    # entity (id prefixed with `_`), that entity *is* the user-facing
+    # function of the device — its `name` becomes the card label and its
+    # `location` becomes the suggested area, since no per-entity sub-card
+    # is minted to host them. Falls back to the synthetic device-level
+    # name and `device.location` for regular multichannel devices.
+    locked = next(
+        (e for e in device.entities
+         if not e.is_unused() and not e.is_device_multichannel),
+        None,
+    )
+    card_name = (locked.name if locked and locked.name else None) or device.name
+    card_location = (locked.location if locked else None) or device.location
+
     info = DeviceInfo(
         identifiers={(DOMAIN, device.unique_id)},
-        name=device.name,
+        name=card_name,
         manufacturer=device.manufacturer,
         model=device.model_num,
         sw_version=device.firmware_rev,
         serial_number=device.serial_num or device.unique_id,
         configuration_url=device.dashboard_uri,
     )
-    # PROTOCOL_PROPOSALS §P7: per-device location populates suggested_area
-    # on the device-registry card. Only set when the firmware actually
-    # reported one — empty/None shouldn't pollute the area registry.
-    if device.location:
-        info["suggested_area"] = device.location
+    if card_location:
+        info["suggested_area"] = card_location
     return info
 
 
@@ -124,9 +135,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _async_register_keypads_and_dispatch_events(hass, entry, gateway)
     _async_register_scene_event_dispatch(hass, gateway)
 
-    # `gateway.connect()` waits for the initial discovery (list_devices +
-    # per-device list_nodes + get_config) so each TagoDevice already has
-    # firmware_rev populated by this point.
     for device in gateway.devices:
         _async_check_firmware_repair(hass, entry, device)
 
@@ -151,26 +159,33 @@ def _parse_version(v: str | None) -> tuple[int, ...] | None:
 def _async_register_keypads_and_dispatch_events(
     hass: HomeAssistant, entry: ConfigEntry, gateway: TagoGateway
 ) -> None:
-    """Register each TagoKeypad as a HA device-registry entry and wire its
-    key events to the HA bus so users can author automations against
-    keypad presses without per-key entities (PROTOCOL_PROPOSALS §P2.6)."""
+    """Wire each TagoKeypad's key events to HA's bus, and — for
+    multichannel keypads — register a sub-card so the keypad's user-set
+    name/location/tag surface as their own device-registry entry
+    (PROTOCOL_PROPOSALS §P2.6).
+
+    Device-locked keypads (id prefixed with `_`) skip the sub-card:
+    the parent TagoDevice's card already represents the whole product
+    and per-key light entities `via_device` directly to it."""
     registry = dr.async_get(hass)
     for device in gateway.devices:
         for kpd in device.entities:
             if not isinstance(kpd, TagoKeypad):
                 continue
-            registry.async_get_or_create(
-                config_entry_id=entry.entry_id,
-                identifiers={(DOMAIN, kpd.unique_id)},
-                manufacturer=device.manufacturer,
-                # `type` carries the keypad variant ("keypad_4btn", etc.) —
-                # the closest thing to a model identifier on the wire now
-                # that there's no dedicated `model_num` field on keypads.
-                model=kpd.type,
-                name=kpd.name or f"Keypad {kpd._tag}",
-                suggested_area=kpd.location,
-                via_device=(DOMAIN, device.unique_id),
-            )
+            if kpd.is_device_multichannel:
+                # Keypads no longer carry their own model_num — the
+                # parent TagoDevice's `model_num` is the canonical
+                # product identifier on the card.
+                registry.async_get_or_create(
+                    config_entry_id=entry.entry_id,
+                    identifiers={(DOMAIN, kpd.unique_id)},
+                    manufacturer=device.manufacturer,
+                    model=device.model_num,
+                    name=kpd.name or f"Keypad {kpd.tag}",
+                    suggested_area=kpd.location,
+                    serial_number=kpd.tag,
+                    via_device=(DOMAIN, device.unique_id),
+                )
             kpd.set_on_key_event(_make_key_event_dispatcher(hass, kpd))
 
 

@@ -207,7 +207,12 @@ class TagoKeypadLEDHA(LightEntity):
         # Use the key_id as the entity's friendly name suffix; the
         # keypad's device card supplies the rest of the label.
         self._attr_name = f"Key {key.key_id}"
-        key.set_on_state_changed(self._on_state_updated)
+
+    async def async_added_to_hass(self) -> None:
+        self._key.set_on_state_changed(self._on_state_updated)
+
+    async def async_will_remove_from_hass(self) -> None:
+        self._key.remove_on_state_changed(self._on_state_updated)
 
     def _on_state_updated(self) -> None:
         self.schedule_update_ha_state()
@@ -216,7 +221,14 @@ class TagoKeypadLEDHA(LightEntity):
     def device_info(self):
         from homeassistant.helpers.entity import DeviceInfo
         from .const import DOMAIN
-        return DeviceInfo(identifiers={(DOMAIN, self._key.keypad_id)})
+        # Multichannel keypad → attach to the keypad's own sub-card.
+        # Device-locked keypad (id starts with `_`) → no keypad
+        # sub-card was minted; attach directly to the parent
+        # TagoDevice's main card instead.
+        kpd = self._key.keypad
+        if kpd.is_device_multichannel:
+            return DeviceInfo(identifiers={(DOMAIN, kpd.unique_id)})
+        return DeviceInfo(identifiers={(DOMAIN, kpd.device.unique_id)})
 
     @property
     def available(self) -> bool:
@@ -272,6 +284,9 @@ async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
             items.append(TagoLightHA(e))
         elif isinstance(e, TagoKeypad):
             for key in e.keys:
-                items.append(TagoKeypadLEDHA(key))
+                # PROTOCOL_PROPOSALS §P2.2: keys with `has_led=false`
+                # are press-only — no LED entity to register.
+                if key.has_led:
+                    items.append(TagoKeypadLEDHA(key))
 
     async_add_entities(items)

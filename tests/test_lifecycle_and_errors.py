@@ -40,6 +40,7 @@ from custom_components.tago.TagoNet import (
     Ramp,
     TagoDevice,
     TagoEntity,
+    TagoGateway,
     TagoLight,
     TagoMessage,
 )
@@ -47,6 +48,13 @@ from custom_components.tago.TagoNet import (
 L0 = "TAGO_TEST_001L1_0"
 
 pytestmark = [pytest.mark.enable_socket]
+
+
+def _make_device(host: str = "dummy:1") -> TagoDevice:
+    """A bare TagoDevice on a (non-connected) TagoGateway. For unit
+    tests that only need an entity-owner."""
+    gateway = TagoGateway(host, authkey="k")
+    return TagoDevice(gateway, {"id": "test_device", "available": True})
 
 
 async def _wait_until(predicate, timeout: float = 2.0, interval: float = 0.02):
@@ -83,16 +91,16 @@ async def test_ha_entry_unload_closes_websocket_cleanly(
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
-    device = entry.runtime_data
-    assert device.is_connected is True
+    gateway = entry.runtime_data
+    assert gateway.is_connected is True
 
     # Trigger HA-side unload — should call our async_unload_entry which
-    # calls device.disconnect().
+    # calls gateway.disconnect().
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
 
-    assert device.is_connected is False
-    assert device._task is None
+    assert gateway.is_connected is False
+    assert gateway._task is None
     # The fake server should observe the connection close.
     await _wait_until(lambda: len(fake_server._clients) == 0, timeout=1.0)
     assert len(fake_server._clients) == 0
@@ -102,7 +110,7 @@ async def test_ha_entry_unload_closes_websocket_cleanly(
 async def test_ha_entry_unload_swallows_disconnect_errors(
     hass, enable_custom_integrations, fake_server, caplog
 ):
-    """If `device.disconnect()` raises during unload, async_unload_entry
+    """If `gateway.disconnect()` raises during unload, async_unload_entry
     must not propagate — it should log and proceed to unload the platforms
     so HA doesn't end up with a half-loaded entry (__init__.py:122-124)."""
     import logging
@@ -126,7 +134,7 @@ async def test_ha_entry_unload_swallows_disconnect_errors(
         raise RuntimeError("disconnect failed unexpectedly")
 
     with patch(
-        "custom_components.tago.TagoDevice.disconnect",
+        "custom_components.tago.TagoGateway.disconnect",
         new=_raising_disconnect,
     ), caplog.at_level(logging.DEBUG):
         # Unload should still succeed despite the disconnect raising.
@@ -173,48 +181,48 @@ async def test_ha_entry_unload_followed_by_setup_works(
 @pytest.mark.asyncio
 async def test_connect_with_no_timeout(fake_server):
     """`connect(timeout=None)` hits the no-timeout shield branch (line 505)."""
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
-    await device.connect(timeout=None)
+    gateway = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
+    await gateway.connect(timeout=None)
     try:
-        assert device.is_connected is True
+        assert gateway.is_connected is True
     finally:
-        await device.disconnect(timeout=5.0)
+        await gateway.disconnect(timeout=5.0)
 
 
 @pytest.mark.asyncio
 async def test_connect_when_already_connected_is_a_noop(fake_server):
     """Second `connect()` while `self._ws` is set returns immediately (line 490)."""
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
-    await device.connect(timeout=5.0)
+    gateway = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
+    await gateway.connect(timeout=5.0)
     try:
-        first_ws = device._ws
-        await device.connect(timeout=5.0)
-        assert device._ws is first_ws  # same object — no reconnect attempted
+        first_ws = gateway._ws
+        await gateway.connect(timeout=5.0)
+        assert gateway._ws is first_ws  # same object — no reconnect attempted
     finally:
-        await device.disconnect(timeout=5.0)
+        await gateway.disconnect(timeout=5.0)
 
 
 @pytest.mark.asyncio
 async def test_disconnect_timeout_raises_when_task_hangs(monkeypatch):
     """`disconnect()` with too-short timeout raises TimeoutError (line 529)."""
-    device = TagoDevice("dummy:1", authkey="k")
+    gateway = TagoGateway("dummy:1", authkey="k")
 
     async def _hang():
         await asyncio.sleep(60)
 
-    device._task = asyncio.create_task(_hang())
+    gateway._task = asyncio.create_task(_hang())
     try:
         with pytest.raises(TimeoutError, match="Timed out waiting"):
-            await device.disconnect(timeout=0.01)
+            await gateway.disconnect(timeout=0.01)
     finally:
-        device._task.cancel()
+        gateway._task.cancel()
 
 
 @pytest.mark.asyncio
 async def test_disconnect_reraises_task_exception():
     """If the underlying task finished with an exception, `disconnect()`
     re-raises it after teardown (line 533)."""
-    device = TagoDevice("dummy:1", authkey="k")
+    gateway = TagoGateway("dummy:1", authkey="k")
 
     async def _boom():
         raise RuntimeError("connection loop exploded")
@@ -222,10 +230,10 @@ async def test_disconnect_reraises_task_exception():
     t = asyncio.create_task(_boom())
     # Let the task finish before disconnect awaits it.
     await asyncio.sleep(0)
-    device._task = t
+    gateway._task = t
 
     with pytest.raises(RuntimeError, match="connection loop exploded"):
-        await device.disconnect(timeout=1.0)
+        await gateway.disconnect(timeout=1.0)
 
 
 @pytest.mark.asyncio
@@ -269,15 +277,15 @@ async def test_connect_timeout_triggers_stop_connection_manager(monkeypatch):
             return False
 
     monkeypatch.setattr(_tn, "wsconnect", lambda **kwargs: _CM())
-    device = TagoDevice("dummy:1", authkey="k")
+    gateway = TagoGateway("dummy:1", authkey="k")
     with pytest.raises(TimeoutError):
-        await device.connect(timeout=0.05)
+        await gateway.connect(timeout=0.05)
 
     # _stop_connection_manager cancels the task and calls _ws.close().
     # It leaves `_ws` as the (now-closed) object reference; the caller is
     # expected to not invoke it anymore — `is_connected` would still be
     # truthy, but the connection task is gone.
-    assert device._task is None
+    assert gateway._task is None
     assert slow_ws._closed is True
 
 
@@ -298,16 +306,18 @@ class _ScriptedFakeServer:
         import websockets
         from websockets.asyncio.server import serve
 
+        async def _accept_any_bearer(connection, request):
+            """PROTOCOL.md §2.1: any well-formed `Authorization: Bearer`
+            header passes — token validation isn't the focus of these
+            tests, only the post-auth list_nodes / list_devices path."""
+            auth = request.headers.get("Authorization", "")
+            if not auth.startswith("Bearer "):
+                return connection.respond(401, "missing bearer token\n")
+            return None
+
         async def _handle(ws):
             self._clients.append(ws)
             try:
-                await ws.recv()  # discard any first frame
-                # Identity envelope
-                await ws.send(json.dumps({
-                    "status": 200, "nonce": "Z" * 32,
-                    "serialnum": "TAGO_TEST_001",
-                    "model": "dimac8", "id": "TAGO_TEST_001",
-                }))
                 async for raw in ws:
                     try:
                         frame = json.loads(raw)
@@ -315,20 +325,36 @@ class _ScriptedFakeServer:
                         continue
                     req = frame.get("req")
                     ref = frame.get("ref")
-                    if req == "list_nodes":
+                    if req == "list_devices":
+                        await ws.send(json.dumps({
+                            "rsp": "list_devices", "src": "TAGO_TEST_001",
+                            "ref": ref,
+                            "devices": [{"id": "TAGO_TEST_001", "available": True}],
+                        }))
+                    elif req == "get_device_info":
+                        reply = {
+                            "rsp": "get_device_info",
+                            "src": "TAGO_TEST_001",
+                            "ref": ref,
+                            "firmware_rev": "1.0.0",
+                            "model_num": "dimac8",
+                            "serial_num": "TAGO_TEST_001",
+                            "nodes": self.list_nodes_payload,
+                        }
+                        await ws.send(json.dumps(reply))
+                    elif req == "list_nodes":
                         reply = {
                             "rsp": "list_nodes",
                             "src": "TAGO_TEST_001",
+                            "ref": ref,
                             "nodes": self.list_nodes_payload,
                         }
-                        if ref:
-                            reply["ref"] = ref
                         await ws.send(json.dumps(reply))
                     # ignore everything else
             except Exception:
                 pass
 
-        self._server = await serve(_handle, "127.0.0.1", 0)
+        self._server = await serve(_handle, "127.0.0.1", 0, process_request=_accept_any_bearer)
         return next(iter(self._server.sockets)).getsockname()[1]
 
     async def stop(self):
@@ -366,14 +392,14 @@ async def test_load_with_no_id_is_skipped(scripted_server_factory):
             ],
         },
     })
-    device = TagoDevice(f"127.0.0.1:{server.port}", authkey="")
-    await device.connect(timeout=5.0)
+    gateway = TagoGateway(f"127.0.0.1:{server.port}", authkey="")
+    await gateway.connect(timeout=5.0)
     try:
-        ids = {e.unique_id for e in device.entities}
+        ids = {e.unique_id for e in gateway.entities}
         assert "valid_load" in ids
-        assert len(device.entities) == 1
+        assert len(gateway.entities) == 1
     finally:
-        await device.disconnect(timeout=5.0)
+        await gateway.disconnect(timeout=5.0)
 
 
 @pytest.mark.asyncio
@@ -387,11 +413,11 @@ async def test_load_construction_exception_is_swallowed_and_logged(
     real_init = TagoLight.__init__
     raised_for: list[str] = []
 
-    def _exploding_init(self, json_data, device):
+    def _exploding_init(self, json_data, gateway):
         if json_data.get("id") == "boom":
             raised_for.append("boom")
             raise ValueError("intentional test failure")
-        real_init(self, json_data, device)
+        real_init(self, json_data, gateway)
 
     monkeypatch.setattr(TagoLight, "__init__", _exploding_init)
 
@@ -404,16 +430,16 @@ async def test_load_construction_exception_is_swallowed_and_logged(
             ],
         },
     })
-    device = TagoDevice(f"127.0.0.1:{server.port}", authkey="")
+    gateway = TagoGateway(f"127.0.0.1:{server.port}", authkey="")
     with caplog.at_level(logging.ERROR):
-        await device.connect(timeout=5.0)
+        await gateway.connect(timeout=5.0)
     try:
-        ids = {e.unique_id for e in device.entities}
+        ids = {e.unique_id for e in gateway.entities}
         assert "ok" in ids
         assert "boom" not in ids
         assert raised_for == ["boom"]
     finally:
-        await device.disconnect(timeout=5.0)
+        await gateway.disconnect(timeout=5.0)
 
 
 # =====================================================================
@@ -425,16 +451,16 @@ async def test_load_construction_exception_is_swallowed_and_logged(
 async def test_send_request_with_response_timeout_resolves_on_matching_ref(
     fake_server,
 ):
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
-    await device.connect(timeout=5.0)
+    gateway = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
+    await gateway.connect(timeout=5.0)
     try:
         # `ping` returns synchronously from the fake server with a `ts` field.
-        reply = await device.send_request(req="ping", responseTimeout=2.0)
+        reply = await gateway.send_request(req="ping", responseTimeout=2.0)
         assert reply is not None
         assert reply.rsp == "ping"
         assert "ts" in reply.data
     finally:
-        await device.disconnect(timeout=5.0)
+        await gateway.disconnect(timeout=5.0)
 
 
 # =====================================================================
@@ -454,12 +480,12 @@ async def test_entity_handle_message_sync_exception_is_swallowed_and_logged(
         L0: {"type": "light_dimmable", "brightness": 0,
              "name": "Light", "tag": "1A"},
     })
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
-    await device.connect(timeout=5.0)
+    gateway = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
+    await gateway.connect(timeout=5.0)
     try:
         # Replace the entity's `handle_message` with one that raises in
         # the sync prep path (i.e. before returning a coroutine).
-        entity = next(iter(device.entities))
+        entity = next(iter(gateway.entities))
 
         def _raising_handle_message(msg):
             raise RuntimeError("synthetic sync failure")
@@ -479,9 +505,9 @@ async def test_entity_handle_message_sync_exception_is_swallowed_and_logged(
                 timeout=1.0,
             )
         # Connection survived the entity-side exception.
-        assert device.is_connected is True
+        assert gateway.is_connected is True
     finally:
-        await device.disconnect(timeout=5.0)
+        await gateway.disconnect(timeout=5.0)
 
 
 @pytest.mark.asyncio
@@ -496,10 +522,10 @@ async def test_entity_async_handler_exception_is_swallowed_and_logged(
         L0: {"type": "light_dimmable", "brightness": 0,
              "name": "Light", "tag": "1A"},
     })
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
-    await device.connect(timeout=5.0)
+    gateway = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
+    await gateway.connect(timeout=5.0)
     try:
-        entity = next(iter(device.entities))
+        entity = next(iter(gateway.entities))
 
         async def _raising_async_handler(msg):
             raise RuntimeError("synthetic async failure")
@@ -519,9 +545,9 @@ async def test_entity_async_handler_exception_is_swallowed_and_logged(
                             for r in caplog.records),
                 timeout=1.0,
             )
-        assert device.is_connected is True
+        assert gateway.is_connected is True
     finally:
-        await device.disconnect(timeout=5.0)
+        await gateway.disconnect(timeout=5.0)
 
 
 # =====================================================================
@@ -590,47 +616,46 @@ def test_tagomessage_reference_property():
 
 
 @pytest.mark.asyncio
-async def test_tagoentity_handle_message_routes_get_config_response_to_config_change():
-    """A non-event message that is a get_config response goes to
-    `handle_config_change` (line 267)."""
-    device = TagoDevice("dummy:1", authkey="k")
+async def test_tagoentity_handle_message_ignores_get_config_response_under_d7():
+    """Per D7 (config frozen after initial connect), runtime
+    `get_config` responses are received but NOT re-applied to entities.
+    `handle_message` should route the message but the entity should
+    leave its config untouched."""
+    device = _make_device()
     entity = TagoEntity(
-        {"id": "L0", "type": "light_dimmable", "name": "x", "location": "y", "tag": "1A"},
+        {"id": "L0", "type": "light_dimmable", "name": "Original",
+         "location": "y", "tag": "1A"},
         device,
     )
-    called: list[str] = []
-
-    def _track_config_change(data):
-        called.append("get_config")
-
-    entity.handle_config_change = _track_config_change
+    original_name = entity.name
 
     msg = TagoMessage.from_payload(
         json.dumps({"rsp": "get_config", "src": "L0", "ref": "r1",
-                    "type": "light_dimmable"})
+                    "type": "light_dimmable", "name": "Renamed"})
     )
     handler = entity.handle_message(msg)
     if handler is not None:
         await handler
-    assert called == ["get_config"]
+    # D7: name from the runtime config response is ignored.
+    assert entity.name == original_name
 
 
 @pytest.mark.asyncio
 async def test_log_when_unavailable_then_available_again_on_reconnect(fake_server, caplog):
     """After a disconnect + reconnect cycle, the integration must emit:
-       1. A WARNING that the device became unavailable
+       1. A WARNING that the gateway became unavailable
        2. An INFO that it's available again
     Each exactly once per transition. Silver-tier `log-when-unavailable`.
     """
     import logging
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
-    await device.connect(timeout=5.0)
+    gateway = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
+    await gateway.connect(timeout=5.0)
     try:
         with caplog.at_level(logging.INFO):
             # Force-close from the client side; the integration's main
             # message loop will exit, the outer while-loop will note the
             # drop, sleep, and reconnect.
-            await device._ws.close()
+            await gateway._ws.close()
             await _wait_until(
                 lambda: any("became unavailable" in r.message for r in caplog.records),
                 timeout=5.0,
@@ -642,7 +667,7 @@ async def test_log_when_unavailable_then_available_again_on_reconnect(fake_serve
             )
         assert sum(1 for r in caplog.records if "available again" in r.message) >= 1
     finally:
-        await device.disconnect(timeout=5.0)
+        await gateway.disconnect(timeout=5.0)
 
 
 @pytest.mark.asyncio
@@ -650,8 +675,8 @@ async def test_log_when_unavailable_fires_once_per_outage(fake_server, caplog):
     """`log-when-unavailable` Silver-tier rule: WARN once on the
     transition to unavailable; don't spam for every reconnect attempt."""
     import logging
-    device = TagoDevice(f"127.0.0.1:{fake_server.port}", authkey="")
-    await device.connect(timeout=5.0)
+    gateway = TagoGateway(f"127.0.0.1:{fake_server.port}", authkey="")
+    await gateway.connect(timeout=5.0)
     try:
         with caplog.at_level(logging.WARNING):
             await fake_server.stop()
@@ -670,9 +695,9 @@ async def test_log_when_unavailable_fires_once_per_outage(fake_server, caplog):
         )
         assert first_count == second_count == 1
     finally:
-        device._running = False
+        gateway._running = False
         try:
-            await device.disconnect(timeout=2.0)
+            await gateway.disconnect(timeout=2.0)
         except Exception:
             pass
 
@@ -681,11 +706,11 @@ async def test_log_when_unavailable_fires_once_per_outage(fake_server, caplog):
 async def test_unused_load_with_existing_device_registry_entry_is_removed(
     hass, enable_custom_integrations, fake_server
 ):
-    """`__init__.py:60` — when an UNUSED load has a pre-existing device in
-    the device registry, the cleanup loop calls `async_remove_device`."""
+    """`__init__.py:60` — when an UNUSED load has a pre-existing gateway in
+    the gateway registry, the cleanup loop calls `async_remove_device`."""
     from homeassistant.helpers import device_registry as dr
 
-    # Pre-register a fake device for the unused load so the cleanup loop
+    # Pre-register a fake gateway for the unused load so the cleanup loop
     # has something to remove.
     fake_server.seed({
         L0: {"type": "UNUSED", "name": "Old Slot", "tag": "1A"},
@@ -698,7 +723,7 @@ async def test_unused_load_with_existing_device_registry_entry_is_removed(
     )
     entry.add_to_hass(hass)
 
-    # Insert a device for L0 BEFORE async_setup so the cleanup branch fires.
+    # Insert a gateway for L0 BEFORE async_setup so the cleanup branch fires.
     registry = dr.async_get(hass)
     pre_existing = registry.async_get_or_create(
         config_entry_id=entry.entry_id,
@@ -711,7 +736,7 @@ async def test_unused_load_with_existing_device_registry_entry_is_removed(
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
-    # Cleanup loop should have removed the pre-existing device.
+    # Cleanup loop should have removed the pre-existing gateway.
     assert registry.async_get_device(identifiers={(DOMAIN, L0)}) is None
 
     await hass.config_entries.async_unload(entry.entry_id)
@@ -720,9 +745,9 @@ async def test_unused_load_with_existing_device_registry_entry_is_removed(
 
 def test_tagodevice_input_event_message_is_a_noop():
     """`input_event_message` is a stub `pass` (line 355)."""
-    device = TagoDevice("dummy:1", authkey="k")
+    gateway = TagoGateway("dummy:1", authkey="k")
     # Call it; should return None and not raise.
-    result = device.input_event_message(None)
+    result = gateway.input_event_message(None)
     assert result is None
 
 
@@ -737,7 +762,7 @@ async def test_connection_task_calls_get_ssl_context_when_useSSL_true(monkeypatc
         get_ssl_called.append("yes")
         return None  # use no SSL underneath
 
-    monkeypatch.setattr(TagoDevice, "get_ssl_context", _fake_get_ssl_context)
+    monkeypatch.setattr(TagoGateway, "get_ssl_context", _fake_get_ssl_context)
 
     # We don't need the connection to succeed — only need the SSL branch
     # to execute before any failure.
@@ -750,8 +775,8 @@ async def test_connection_task_calls_get_ssl_context_when_useSSL_true(monkeypatc
 
     monkeypatch.setattr(_tn, "wsconnect", lambda **kwargs: _ImmediateFailCM())
 
-    device = TagoDevice("dummy:1", authkey="k", useSSL=True)
+    gateway = TagoGateway("dummy:1", authkey="k", useSSL=True)
     with pytest.raises((TimeoutError, OSError)):
-        await device.connect(timeout=0.2)
+        await gateway.connect(timeout=0.2)
 
     assert get_ssl_called == ["yes"] or len(get_ssl_called) >= 1

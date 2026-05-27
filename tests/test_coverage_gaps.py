@@ -18,6 +18,7 @@ from custom_components.tago.TagoNet import (
     TagoDevice,
     TagoEntity,
     TagoFan,
+    TagoGateway,
     TagoLight,
     TagoMessage,
     TagoSwitch,
@@ -27,6 +28,13 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 L0 = "TAGO_TEST_001L1_0"
 
 pytestmark = [pytest.mark.enable_socket]
+
+
+def _make_device(host: str = "dummy:1") -> TagoDevice:
+    """A bare TagoDevice attached to a (non-connected) TagoGateway —
+    sufficient for tests that only need the entity-owner relationship."""
+    gateway = TagoGateway(host, authkey="k")
+    return TagoDevice(gateway, {"id": "test_device", "available": True})
 
 
 # =====================================================================
@@ -80,7 +88,7 @@ def test_tagomessage_is_request_with_and_without_filter():
 
 @pytest.mark.asyncio
 async def test_tagolight_set_brightness_requires_value():
-    device = TagoDevice("dummy:1", authkey="k")
+    device = _make_device()
     light = TagoLight(
         {"id": "L0", "type": "light_dimmable", "name": "x", "location": "y", "tag": "1A"},
         device,
@@ -91,7 +99,7 @@ async def test_tagolight_set_brightness_requires_value():
 
 @pytest.mark.asyncio
 async def test_tagolight_set_ct_requires_value():
-    device = TagoDevice("dummy:1", authkey="k")
+    device = _make_device()
     light = TagoLight(
         {"id": "L0", "type": "light_ww", "name": "x", "location": "y", "tag": "1A"},
         device,
@@ -102,7 +110,7 @@ async def test_tagolight_set_ct_requires_value():
 
 @pytest.mark.asyncio
 async def test_tagolight_set_colour_requires_pair():
-    device = TagoDevice("dummy:1", authkey="k")
+    device = _make_device()
     light = TagoLight(
         {"id": "L0", "type": "light_rgb", "name": "x", "location": "y", "tag": "1A"},
         device,
@@ -119,7 +127,7 @@ async def test_tagolight_set_colour_requires_pair():
 # =====================================================================
 
 def _make_light_for(typ: str) -> TagoLight:
-    device = TagoDevice("dummy:1", authkey="k")
+    device = _make_device()
     return TagoLight(
         {"id": "L0", "type": typ, "name": "x", "location": "y", "tag": "1A"},
         device,
@@ -149,7 +157,7 @@ def test_non_rgb_light_xy_property_returns_none():
 def test_light_color_mode_unknown_type_returns_onoff():
     """`color_mode` and `supported_color_modes` default to ONOFF for any
     unrecognised type. (light.py:98 / 56 / 74)"""
-    device = TagoDevice("dummy:1", authkey="k")
+    device = _make_device()
     light = TagoLight(
         {"id": "L0", "type": "totally_unknown", "name": "x", "location": "y", "tag": "1A"},
         device,
@@ -193,7 +201,7 @@ class _CaptureDevice:
 
 @pytest.mark.asyncio
 async def test_async_stop_transition_sends_stop_ramp():
-    device = TagoDevice("dummy:1", authkey="k")
+    device = _make_device()
     light = TagoLight(
         {"id": "L0", "type": "light_dimmable", "name": "x", "location": "y", "tag": "1A"},
         device,
@@ -205,21 +213,21 @@ async def test_async_stop_transition_sends_stop_ramp():
 
 
 # =====================================================================
-# TagoLight.adjust_brightness — wrapper around set_light (TagoNet.py:952-953)
+# TagoLight.set_brightness_relative — sends brightness+ delta
 # =====================================================================
 
 @pytest.mark.asyncio
-async def test_tagolight_adjust_brightness_uses_set_light():
-    device = TagoDevice("dummy:1", authkey="k")
+async def test_tagolight_set_brightness_relative_uses_set_light():
+    device = _make_device()
     light = TagoLight(
         {"id": "L0", "type": "light_dimmable", "name": "x", "location": "y", "tag": "1A"},
         device,
     )
     light._device = _CaptureDevice()
-    await light.adjust_brightness(brightness=0.5)
+    await light.set_brightness_relative(brightness=0.5)
     call = light._device.calls[0]
     assert call["req"] == TagoLight.REQ_SET_LIGHT
-    assert call["data"][TagoLight.PROP_BRIGHTNESS] == 500
+    assert call["data"][TagoLight.PROP_BRIGHTNESS_PLUS] == 500
 
 
 # =====================================================================
@@ -228,7 +236,7 @@ async def test_tagolight_adjust_brightness_uses_set_light():
 
 @pytest.mark.asyncio
 async def test_tagolight_stop_ramp_sends_stop_ramp_request():
-    device = TagoDevice("dummy:1", authkey="k")
+    device = _make_device()
     light = TagoLight(
         {"id": "L0", "type": "light_dimmable", "name": "x", "location": "y", "tag": "1A"},
         device,
@@ -244,7 +252,7 @@ async def test_tagolight_stop_ramp_sends_stop_ramp_request():
 
 @pytest.mark.asyncio
 async def test_tagolight_set_light_flash_sends_effect():
-    device = TagoDevice("dummy:1", authkey="k")
+    device = _make_device()
     light = TagoLight(
         {"id": "L0", "type": "light_dimmable", "name": "x", "location": "y", "tag": "1A"},
         device,
@@ -259,7 +267,7 @@ async def test_tagolight_set_light_flash_sends_effect():
 
 @pytest.mark.asyncio
 async def test_tagolight_set_brightness_with_rate_emits_rate_field():
-    device = TagoDevice("dummy:1", authkey="k")
+    device = _make_device()
     light = TagoLight(
         {"id": "L0", "type": "light_dimmable", "name": "x", "location": "y", "tag": "1A"},
         device,
@@ -275,7 +283,7 @@ async def test_tagolight_set_brightness_with_rate_emits_rate_field():
 # =====================================================================
 
 def test_tagolight_ramp_update_writes_all_four_fields():
-    device = TagoDevice("dummy:1", authkey="k")
+    device = _make_device()
     light = TagoLight(
         {"id": "L0", "type": "light_rgbww", "name": "x", "location": "y", "tag": "1A"},
         device,
@@ -288,7 +296,7 @@ def test_tagolight_ramp_update_writes_all_four_fields():
 
 
 def test_tagolight_ramp_update_skips_none_values():
-    device = TagoDevice("dummy:1", authkey="k")
+    device = _make_device()
     light = TagoLight(
         {"id": "L0", "type": "light_rgbww", "name": "x", "location": "y", "tag": "1A"},
         device,
@@ -310,7 +318,7 @@ def test_tagolight_ramp_update_skips_none_values():
 
 @pytest.mark.asyncio
 async def test_tagofan_toggle_sends_toggle_request():
-    device = TagoDevice("dummy:1", authkey="k")
+    device = _make_device()
     fan = TagoFan(
         {"id": "F0", "type": "fan_onoff", "name": "x", "location": "y", "tag": "1A"},
         device,
@@ -326,7 +334,7 @@ async def test_tagofan_toggle_sends_toggle_request():
 
 @pytest.mark.asyncio
 async def test_device_reboot_noop_when_disconnected():
-    device = TagoDevice("dummy:1", authkey="k")
+    device = _make_device()
     assert not device.is_connected
     # Should not raise; should not attempt to send anything.
     await device.reboot()
@@ -334,7 +342,7 @@ async def test_device_reboot_noop_when_disconnected():
 
 @pytest.mark.asyncio
 async def test_device_identify_noop_when_disconnected():
-    device = TagoDevice("dummy:1", authkey="k")
+    device = _make_device()
     assert not device.is_connected
     await device.identify()
 
@@ -345,7 +353,12 @@ async def test_device_identify_noop_when_disconnected():
 # =====================================================================
 
 def test_tagoentityha_repr_returns_json_blob():
-    device = TagoDevice("dummy:1", authkey="k")
+    """`repr()` of a wrapper renders a JSON snapshot of the wire
+    entity's identity. The wrapper's HA-facing `name` is `None` now
+    (per HA convention: device card carries the user-set name), so
+    `repr()` reads the wire-entity name directly via the device-card
+    helper."""
+    device = _make_device()
     device._eid = "TAGO_TEST_001"
     light = TagoLight(
         {"id": "L0", "type": "light_dimmable", "name": "Kitchen", "location": "K", "tag": "1A"},
@@ -355,11 +368,14 @@ def test_tagoentityha_repr_returns_json_blob():
     rendered = repr(ha)
     parsed = json.loads(rendered)
     assert parsed["id"] == "L0"
-    assert parsed["name"] == "Kitchen"
+    # repr() reports the HA entity's `name` field, which is None per
+    # the device-card pattern — the device card carries the wire name.
+    assert parsed["name"] is None
+    assert ha._device_card_name == "Kitchen"
 
 
 def test_tagoentityha_is_of_domain_default_false():
-    device = TagoDevice("dummy:1", authkey="k")
+    device = _make_device()
     light = TagoLight(
         {"id": "L0", "type": "light_dimmable", "name": "x", "location": "y", "tag": "1A"},
         device,
@@ -369,7 +385,7 @@ def test_tagoentityha_is_of_domain_default_false():
 
 
 def test_tagoentityha_type_to_string_base_returns_empty_string():
-    device = TagoDevice("dummy:1", authkey="k")
+    device = _make_device()
     entity = TagoEntity(
         {"id": "E0", "type": "UNUSED", "name": "x", "location": "y", "tag": ""},
         device,
@@ -379,7 +395,7 @@ def test_tagoentityha_type_to_string_base_returns_empty_string():
 
 
 def test_tagoentityha_device_info_none_when_entity_unused():
-    device = TagoDevice("dummy:1", authkey="k")
+    device = _make_device()
     device._eid = "TAGO_TEST_001"
     entity = TagoEntity(
         {"id": "E0", "type": "UNUSED", "name": "x", "location": "y", "tag": ""},
@@ -448,25 +464,30 @@ async def test_async_setup_entry_raises_not_ready_on_unreachable_host(
 # (TagoNet.py:267 ish)
 # =====================================================================
 
-def test_tagoentity_name_falls_back_to_device_and_tag_when_unnamed():
-    device = TagoDevice("dummy:1", authkey="k")
+def test_device_card_name_falls_back_to_device_and_tag_when_unnamed():
+    """The HA entity reports `name = None` (device-card pattern). The
+    *device-card* name (which HA uses as friendly_name) falls back
+    through `<wire name>` → `<device_id> <tag>` → `<unique_id>`."""
+    device = _make_device()
     device._eid = "TAGO_DEV"
     entity = TagoEntity(
         {"id": "E0", "type": "light_dimmable", "name": "", "location": "", "tag": "1A"},
         device,
     )
     ha = TagoEntityHA(entity)
-    # No name on entity → fallback to "<device_id> <tag>"
-    assert ha.name == "TAGO_DEV 1A"
+    assert ha.name is None
+    assert ha._device_card_name == "TAGO_DEV 1A"
 
 
-def test_tagoentity_name_falls_back_to_unique_id_when_no_tag():
-    device = TagoDevice("dummy:1", authkey="k")
+def test_device_card_name_falls_back_to_unique_id_when_no_tag():
+    """Both wire-name and tag are empty → final fallback is the
+    entity's `unique_id`."""
+    device = _make_device()
     device._eid = "TAGO_DEV"
     entity = TagoEntity(
         {"id": "E0", "type": "light_dimmable", "name": "", "location": "", "tag": ""},
         device,
     )
-    # tag is "" which is falsy → fallback further to unique_id
     ha = TagoEntityHA(entity)
-    assert ha.name == "E0"
+    assert ha.name is None
+    assert ha._device_card_name == "E0"

@@ -12,12 +12,17 @@ import json
 
 import pytest
 
-from custom_components.tago.TagoNet import TagoDevice, TagoLight, TagoMessage
+from custom_components.tago.TagoNet import TagoDevice, TagoGateway, TagoLight, TagoMessage
 from custom_components.tago.entity import TagoEntityHA
 
 
+def _make_device(host: str = "dummy:1") -> TagoDevice:
+    gateway = TagoGateway(host, authkey="k")
+    return TagoDevice(gateway, {"id": "test_device", "available": True})
+
+
 def _make_light(typ: str = TagoLight.LIGHT_DIMMABLE, **extra) -> TagoLight:
-    device = TagoDevice("dummy:1", authkey="k")
+    device = _make_device()
     payload = {"id": "L0", "type": typ, "name": "Test", "location": "Lab", "tag": "1A"}
     payload.update(extra)
     return TagoLight(payload, device)
@@ -151,27 +156,23 @@ def test_percent_to_kelvin_read_back_via_color_temp_kelvin():
 def test_ct_range_from_get_config_is_applied_to_entity():
     """ct_range arrives as `[warm_K, cool_K]` per PROTOCOL.md §13.1."""
     light = _make_light(typ=TagoLight.LIGHT_CCT)
-    light.parse_state_json({TagoLight.PROP_CT_RANGE: [2700, 6500]})
+    light.handle_state_change({TagoLight.PROP_CT_RANGE: [2700, 6500]})
     assert (light._ct_range_min, light._ct_range_max) == (2700, 6500)
 
 
 def test_ct_range_clamped_to_safe_bounds():
     """Bounds outside the HA-safe range get clamped to [CT_MIN, CT_MAX]."""
     light = _make_light(typ=TagoLight.LIGHT_CCT)
-    light.parse_state_json({TagoLight.PROP_CT_RANGE: [800, 99999]})
+    light.handle_state_change({TagoLight.PROP_CT_RANGE: [800, 99999]})
     assert light._ct_range_min == TagoLight.CT_MIN
     assert light._ct_range_max == TagoLight.CT_MAX
 
 
-@pytest.mark.asyncio
-async def test_handle_config_change_applies_ct_range_indexes():
-    """config_changed event with `ct_range` should set min from [0] and max
-    from [1] — fixes the bug where both were assigned the whole list."""
+def test_handle_state_change_applies_ct_range_indexes():
+    """A state payload carrying `ct_range` should set min from [0] and
+    max from [1] — fixes the bug where both were assigned the whole list."""
     light = _make_light(typ=TagoLight.LIGHT_CCT)
-    msg = TagoMessage.from_payload(
-        json.dumps({"evt": "config_changed", "src": "L0", "ct_range": [2200, 5000]})
-    )
-    await light.handle_config_change(msg)
+    light.handle_state_change({"ct_range": [2200, 5000]})
     assert (light._ct_range_min, light._ct_range_max) == (2200, 5000)
 
 
@@ -196,20 +197,15 @@ async def test_xy_color_forwarded_to_wire_as_x_y_floats():
 
 @pytest.mark.asyncio
 async def test_state_changed_with_ramp_starts_local_ramp():
+    """handle_state_change spawns a Ramp task via asyncio.create_task,
+    so the test needs a running event loop."""
     light = _make_light()
-    msg = TagoMessage.from_payload(
-        json.dumps(
-            {
-                "evt": "state_changed", "src": "L0", "id": "L0", "type": "light_dimmable",
-                "brightness": 800,
-                "ramp": {"duration": 1000, "elapsed": 0,
-                         "start": {"brightness": 0}, "end": {"brightness": 800}},
-            }
-        )
-    )
-    await light.handle_state_change(msg)
+    light.handle_state_change({
+        "brightness": 800,
+        "ramp": {"duration": 1000, "elapsed": 0,
+                 "start": {"brightness": 0}, "end": {"brightness": 800}},
+    })
     assert light.is_ramp_active
-    # Clean up the spawned ramp task before the loop exits.
     if light._ramp:
         light._ramp.cancel()
 
@@ -217,51 +213,39 @@ async def test_state_changed_with_ramp_starts_local_ramp():
 @pytest.mark.asyncio
 async def test_state_changed_without_ramp_clears_ramp():
     light = _make_light()
-    # Prime a ramp.
-    msg1 = TagoMessage.from_payload(
-        json.dumps({
-            "evt": "state_changed", "src": "L0",
-            "brightness": 0,
-            "ramp": {"duration": 1000, "elapsed": 0,
-                     "start": {"brightness": 0}, "end": {"brightness": 800}},
-        })
-    )
-    await light.handle_state_change(msg1)
+    light.handle_state_change({
+        "brightness": 0,
+        "ramp": {"duration": 1000, "elapsed": 0,
+                 "start": {"brightness": 0}, "end": {"brightness": 800}},
+    })
     assert light.is_ramp_active
 
-    # End-of-ramp state_changed has no ramp object.
-    msg2 = TagoMessage.from_payload(
-        json.dumps({"evt": "state_changed", "src": "L0", "brightness": 800})
-    )
-    await light.handle_state_change(msg2)
+    light.handle_state_change({"brightness": 800})
     assert not light.is_ramp_active
 
 
 # ---------------- state_changed self-echo handling ----------------
 
-@pytest.mark.asyncio
-async def test_self_echo_state_changed_updates_internal_state_only():
-    """The HA platform should accept the broadcast echo of its own set_light;
-    parse_state_json mutates internal state without raising or clearing other
-    fields the echo doesn't carry."""
+def test_self_echo_state_changed_updates_internal_state_only():
+    """The HA platform should accept the broadcast echo of its own
+    set_light; handle_state_change mutates internal state without
+    raising or clearing other fields the echo doesn't carry."""
     light = _make_light(typ=TagoLight.LIGHT_CCT)
     light._brightness = 800
     light._ct = 400
-    msg = TagoMessage.from_payload(
-        json.dumps({"evt": "state_changed", "src": "L0", "brightness": 800})  # no ct
-    )
-    await light.handle_state_change(msg)
+    light.handle_state_change({"brightness": 800})  # no ct
     assert light._brightness == 800
     assert light._ct == 400  # not clobbered by absent key
 
 
 # ---------------- reconnect preserves HA unique_id mapping ----------------
 
-@pytest.mark.asyncio
-async def test_unique_id_is_entity_id_and_stable_across_reparse():
+def test_unique_id_is_entity_id_and_stable_across_reparse():
     light = _make_light()
     first_uid = light.unique_id
-    light.update_from_discovery_payload(
+    # Re-feeding a fresh discovery-style payload through handle_state_change
+    # (the same path init uses) must not change `unique_id`.
+    light.handle_state_change(
         {"id": "L0", "type": "light_dimmable", "name": "Renamed", "location": "L2", "tag": "1B"}
     )
     assert light.unique_id == first_uid

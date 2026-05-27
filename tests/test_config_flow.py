@@ -15,6 +15,30 @@ class _DiscoveryInfo:
     properties: dict[str, str]
 
 
+# Helpers ---------------------------------------------------------------
+
+def _install_fake_gateway(monkeypatch, *, raises=None, capture: dict | None = None):
+    """Patch `config_flow.TagoGateway` with a fake whose
+    `connect_and_auth` either succeeds (returns None) or raises the
+    given exception. The real integration only calls `connect_and_auth`
+    in the config flow now (PROTOCOL.md §2.1 bearer auth) — there's
+    no follow-up `disconnect()` to drive."""
+
+    class FakeGateway:
+        def __init__(self, host: str, authkey: str):
+            if capture is not None:
+                capture["host"] = host
+                capture["authkey"] = authkey
+
+        async def connect_and_auth(self, timeout: float | None = None) -> None:
+            if raises is not None:
+                raise raises
+
+    monkeypatch.setattr("custom_components.tago.config_flow.TagoGateway", FakeGateway)
+
+
+# Tests -----------------------------------------------------------------
+
 @pytest.mark.asyncio
 async def test_zeroconf_discovery_populates_host_and_name() -> None:
     flow = TagoConfigFlowHandler()
@@ -45,18 +69,7 @@ async def test_zeroconf_discovery_populates_host_and_name() -> None:
 
 @pytest.mark.asyncio
 async def test_user_flow_connection_failure_returns_cannot_connect(monkeypatch) -> None:
-    class FakeDevice:
-        def __init__(self, host: str, authkey: str):
-            self.host = host
-            self.authkey = authkey
-
-        async def connect(self, timeout: float = 0) -> None:
-            raise OSError("bad host")
-
-        async def disconnect(self, timeout: float = 0) -> None:
-            return None
-
-    monkeypatch.setattr("custom_components.tago.config_flow.TagoDevice", FakeDevice)
+    _install_fake_gateway(monkeypatch, raises=OSError("bad host"))
 
     flow = TagoConfigFlowHandler()
     flow.context = {"source": "user"}
@@ -72,18 +85,7 @@ async def test_user_flow_connection_failure_returns_cannot_connect(monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_user_flow_invalid_auth_returns_invalid_auth(monkeypatch) -> None:
-    class FakeDevice:
-        def __init__(self, host: str, authkey: str):
-            self.host = host
-            self.authkey = authkey
-
-        async def connect(self, timeout: float = 0) -> None:
-            raise PermissionError("bad auth")
-
-        async def disconnect(self, timeout: float = 0) -> None:
-            return None
-
-    monkeypatch.setattr("custom_components.tago.config_flow.TagoDevice", FakeDevice)
+    _install_fake_gateway(monkeypatch, raises=PermissionError("bad auth"))
 
     flow = TagoConfigFlowHandler()
     flow.context = {"source": "user"}
@@ -96,22 +98,11 @@ async def test_user_flow_invalid_auth_returns_invalid_auth(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_user_flow_success_creates_entry_and_uses_optional_auth(monkeypatch) -> None:
-    class FakeDevice:
-        def __init__(self, host: str, authkey: str):
-            self.host = host
-            self.authkey = authkey
-            self.unique_id = "SN-1"
-            self.serial_num = "SN-1"
-            self.model_num = "M-1"
-
-        async def connect(self, timeout: float = 0) -> None:
-            return None
-
-        async def disconnect(self, timeout: float = 0) -> None:
-            return None
-
-    monkeypatch.setattr("custom_components.tago.config_flow.TagoDevice", FakeDevice)
+async def test_user_flow_success_creates_entry_with_hoststr_as_unique_id(monkeypatch) -> None:
+    """The probe-only config flow can't enumerate devices, so the
+    entry's `unique_id` is the hoststr and the title carries the
+    gateway endpoint rather than per-device identity."""
+    _install_fake_gateway(monkeypatch)
 
     flow = TagoConfigFlowHandler()
     flow.context = {"source": "user"}
@@ -126,9 +117,9 @@ async def test_user_flow_success_creates_entry_and_uses_optional_auth(monkeypatc
 
     result = await flow.async_step_user({CONF_HOSTSTR: "dev.local:443"})
 
-    assert seen_unique_ids == ["SN-1"]
+    assert seen_unique_ids == ["dev.local:443"]
     assert result["type"] == "create_entry"
-    assert result["title"] == "M-1 SN-1"
+    assert "dev.local:443" in result["title"]
     assert result["data"][CONF_HOSTSTR] == "dev.local:443"
     assert result["data"][CONF_PIN] == ""
 
@@ -146,57 +137,15 @@ async def test_zeroconf_confirm_form_has_device_placeholder() -> None:
     assert result["description_placeholders"]["device_name"] == "SN-ZC"
 
 
-@pytest.mark.asyncio
-async def test_connection_test_attempts_disconnect_after_connect_error(monkeypatch) -> None:
-    calls: list[str] = []
-
-    class FakeDevice:
-        def __init__(self, host: str, authkey: str):
-            self.host = host
-            self.authkey = authkey
-
-        async def connect(self, timeout: float = 0) -> None:
-            calls.append("connect")
-            raise OSError("boom")
-
-        async def disconnect(self, timeout: float = 0) -> None:
-            calls.append("disconnect")
-
-    monkeypatch.setattr("custom_components.tago.config_flow.TagoDevice", FakeDevice)
-
-    flow = TagoConfigFlowHandler()
-    flow.context = {"source": "user"}
-    result = await flow.async_step_user({CONF_HOSTSTR: "dev.local:443", CONF_PIN: "k"})
-
-    assert result["errors"]["base"] == "cannot_connect"
-    assert calls == ["connect", "disconnect"]
-
-
 # =====================================================================
-# Zeroconf-flow branches (lines 81-82, 117, 125, 131-132)
+# Zeroconf-flow branches
 # =====================================================================
 
 @pytest.mark.asyncio
 async def test_zeroconf_confirm_submission_proceeds_to_connection_test(monkeypatch) -> None:
-    """async_step_zeroconf_confirm with user_input dispatches to test_connection
-    (covers lines 81-82)."""
-    captured = {}
-
-    class FakeDevice:
-        def __init__(self, host: str, authkey: str):
-            self.unique_id = "SN-Z"
-            self.serial_num = "SN-Z"
-            self.model_num = "M-Z"
-            captured["host"] = host
-            captured["authkey"] = authkey
-
-        async def connect(self, timeout: float = 0) -> None:
-            return None
-
-        async def disconnect(self, timeout: float = 0) -> None:
-            return None
-
-    monkeypatch.setattr("custom_components.tago.config_flow.TagoDevice", FakeDevice)
+    """async_step_zeroconf_confirm with user_input dispatches to test_connection."""
+    captured: dict = {}
+    _install_fake_gateway(monkeypatch, capture=captured)
 
     flow = TagoConfigFlowHandler()
     flow.context = {"source": "zeroconf"}
@@ -218,20 +167,7 @@ async def test_zeroconf_confirm_submission_proceeds_to_connection_test(monkeypat
 
 @pytest.mark.asyncio
 async def test_zeroconf_flow_invalid_auth_returns_to_zeroconf_confirm(monkeypatch) -> None:
-    """A zeroconf-sourced flow that gets PermissionError loops back to
-    zeroconf_confirm (covers line 117)."""
-
-    class FakeDevice:
-        def __init__(self, host: str, authkey: str):
-            pass
-
-        async def connect(self, timeout: float = 0) -> None:
-            raise PermissionError("bad auth")
-
-        async def disconnect(self, timeout: float = 0) -> None:
-            return None
-
-    monkeypatch.setattr("custom_components.tago.config_flow.TagoDevice", FakeDevice)
+    _install_fake_gateway(monkeypatch, raises=PermissionError("bad auth"))
 
     flow = TagoConfigFlowHandler()
     flow.context = {"source": "zeroconf"}
@@ -247,20 +183,7 @@ async def test_zeroconf_flow_invalid_auth_returns_to_zeroconf_confirm(monkeypatc
 
 @pytest.mark.asyncio
 async def test_zeroconf_flow_connection_failure_returns_to_zeroconf_confirm(monkeypatch) -> None:
-    """A zeroconf-sourced flow that gets OSError loops back to
-    zeroconf_confirm (covers line 125)."""
-
-    class FakeDevice:
-        def __init__(self, host: str, authkey: str):
-            pass
-
-        async def connect(self, timeout: float = 0) -> None:
-            raise OSError("connect refused")
-
-        async def disconnect(self, timeout: float = 0) -> None:
-            return None
-
-    monkeypatch.setattr("custom_components.tago.config_flow.TagoDevice", FakeDevice)
+    _install_fake_gateway(monkeypatch, raises=OSError("connect refused"))
 
     flow = TagoConfigFlowHandler()
     flow.context = {"source": "zeroconf"}
@@ -272,74 +195,3 @@ async def test_zeroconf_flow_connection_failure_returns_to_zeroconf_confirm(monk
     assert result["type"] == "form"
     assert result["step_id"] == "zeroconf_confirm"
     assert result["errors"]["base"] == "cannot_connect"
-
-
-@pytest.mark.asyncio
-async def test_disconnect_cleanup_exception_is_swallowed(monkeypatch, caplog) -> None:
-    """The finally-block disconnect must not propagate exceptions
-    (covers lines 131-132)."""
-    import logging
-
-    class FakeDevice:
-        def __init__(self, host: str, authkey: str):
-            self.unique_id = "SN-X"
-            self.serial_num = "SN-X"
-            self.model_num = "M-X"
-
-        async def connect(self, timeout: float = 0) -> None:
-            return None
-
-        async def disconnect(self, timeout: float = 0) -> None:
-            raise RuntimeError("disconnect failed unexpectedly")
-
-    monkeypatch.setattr("custom_components.tago.config_flow.TagoDevice", FakeDevice)
-
-    flow = TagoConfigFlowHandler()
-    flow.context = {"source": "user"}
-
-    async def _set_unique_id(value: str):
-        return None
-
-    flow.async_set_unique_id = _set_unique_id  # type: ignore[method-assign]
-    flow._abort_if_unique_id_configured = lambda **kw: None  # type: ignore[method-assign]
-
-    with caplog.at_level(logging.DEBUG):
-        result = await flow.async_step_user({CONF_HOSTSTR: "dev:443", CONF_PIN: "k"})
-
-    # Entry created despite the disconnect error.
-    assert result["type"] == "create_entry"
-    # The exception was logged at debug level.
-    assert any("Connection cleanup failed" in r.message for r in caplog.records)
-
-
-@pytest.mark.asyncio
-async def test_connection_test_attempts_disconnect_after_success(monkeypatch) -> None:
-    calls: list[str] = []
-
-    class FakeDevice:
-        def __init__(self, host: str, authkey: str):
-            self.unique_id = "SN-2"
-            self.serial_num = "SN-2"
-            self.model_num = "M-2"
-
-        async def connect(self, timeout: float = 0) -> None:
-            calls.append("connect")
-
-        async def disconnect(self, timeout: float = 0) -> None:
-            calls.append("disconnect")
-
-    monkeypatch.setattr("custom_components.tago.config_flow.TagoDevice", FakeDevice)
-
-    flow = TagoConfigFlowHandler()
-    flow.context = {"source": "user"}
-
-    async def _set_unique_id(value: str):
-        return None
-
-    flow.async_set_unique_id = _set_unique_id  # type: ignore[method-assign]
-    flow._abort_if_unique_id_configured = lambda **kw: None  # type: ignore[method-assign]
-
-    result = await flow.async_step_user({CONF_HOSTSTR: "dev.local:443", CONF_PIN: "k"})
-
-    assert result["type"] == "create_entry"
-    assert calls == ["connect", "disconnect"]

@@ -119,28 +119,12 @@ class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             new_host = user_input[CONF_HOSTSTR].strip()
             new_pin = user_input.get(CONF_PIN, "").strip()
             self.errors = {}
-            gateway: TagoGateway | None = None
             try:
-                gateway = TagoGateway(new_host, new_pin)
-                await gateway.connect(timeout=5.0)
-                # Same gateway? The entry's unique_id was set from the first
-                # device's serial when the entry was created; verify it's
-                # still present so the user can't repoint at a different
-                # physical Tago and overwrite the entry by mistake.
-                primary = gateway.devices[0] if gateway.devices else None
-                primary_serial = primary.serial_num if primary else None
-                if entry.unique_id and primary_serial != entry.unique_id:
-                    return self.async_abort(reason="wrong_device")
+                await TagoGateway(new_host, new_pin).connect_and_auth(timeout=5.0)
             except PermissionError:
                 self.errors["base"] = "invalid_auth"
             except (ConnectionError, OSError, TimeoutError, asyncio.TimeoutError):
                 self.errors["base"] = "cannot_connect"
-            finally:
-                if gateway is not None:
-                    try:
-                        await gateway.disconnect(timeout=3.0)
-                    except Exception as err:
-                        _LOGGER.debug("Connection cleanup failed: %s", err)
 
             if not self.errors:
                 new_data = {
@@ -188,20 +172,12 @@ class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self.pin = user_input.get(CONF_PIN, "").strip()
             self.errors = {}
-            gateway: TagoGateway | None = None
             try:
-                gateway = TagoGateway(self.hoststr, self.pin)
-                await gateway.connect(timeout=5.0)
+                await TagoGateway(self.hoststr, self.pin).connect_and_auth(timeout=5.0)
             except PermissionError:
                 self.errors["base"] = "invalid_auth"
             except (ConnectionError, OSError, TimeoutError, asyncio.TimeoutError):
                 self.errors["base"] = "cannot_connect"
-            finally:
-                if gateway is not None:
-                    try:
-                        await gateway.disconnect(timeout=3.0)
-                    except Exception as err:
-                        _LOGGER.debug("Connection cleanup failed: %s", err)
 
             if not self.errors and self._reauth_entry is not None:
                 new_data = {**self._reauth_entry.data, CONF_PIN: self.pin}
@@ -223,22 +199,11 @@ class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_test_connection(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Test the connection to the gateway."""
+        """Probe the gateway: just verify host reachability + PIN auth.
+        Per-device discovery is deferred to entry setup."""
         self.errors = {}
-        gateway: TagoGateway | None = None
-        primary_serial: str | None = None
-        primary_model: str | None = None
-        primary_id: str | None = None
-
         try:
-            gateway = TagoGateway(self.hoststr, self.pin)
-            await gateway.connect(timeout=5.0)
-            primary = gateway.devices[0] if gateway.devices else None
-            if primary is not None:
-                primary_serial = primary.serial_num
-                primary_model = primary.model_num
-                primary_id = primary.unique_id
-
+            await TagoGateway(self.hoststr, self.pin).connect_and_auth(timeout=5.0)
         except PermissionError as e:
             _LOGGER.debug("Authentication failed: %s", str(e))
             self.errors["base"] = "invalid_auth"
@@ -253,32 +218,20 @@ class TagoConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             if "zeroconf" in self.context.get("source", ""):
                 return await self.async_step_zeroconf_confirm()
             return await self.async_step_user()
-        finally:
-            if gateway is not None:
-                try:
-                    await gateway.disconnect(timeout=3.0)
-                except Exception as err:
-                    _LOGGER.debug("Connection cleanup failed: %s", err)
 
-        # Use the first device's serial as the entry's unique_id so the
-        # value is stable across HA reloads (matches the pre-gateway
-        # semantics when there was only one device). Fall back to the
-        # hoststr if no devices reported back.
-        unique_id = primary_serial or self.hoststr
-        await self.async_set_unique_id(unique_id)
+        # hoststr is the only identifier available from a pure auth
+        # probe (no list_devices). The probe doesn't enumerate the
+        # gateway's devices, so we can't pick a stable per-device
+        # serial here.
+        await self.async_set_unique_id(self.hoststr)
         self._abort_if_unique_id_configured()
 
-        title = (
-            f'{primary_model} {primary_serial}'
-            if primary_model and primary_serial
-            else f'TAGO Gateway @ {self.hoststr}'
-        )
         _LOGGER.debug("Successfully connected to Tago gateway %s", self.hoststr)
         return self.async_create_entry(
-            title=title,
+            title=f'TAGO Gateway @ {self.hoststr}',
             data={
                 CONF_PIN: self.pin,
-                CONF_DEVICENAME: primary_id or self.hoststr,
+                CONF_DEVICENAME: self.hoststr,
                 CONF_HOSTSTR: self.hoststr,
             },
         )
