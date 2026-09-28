@@ -4,6 +4,7 @@ import json
 
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import floor_registry as fr
 from homeassistant.core import HomeAssistant, callback
 
@@ -200,7 +201,7 @@ class TagoEntityHA:
         # bound `hass` onto this entity (unit tests instantiate without).
         if self.location and getattr(self, "hass", None) is not None:
             async_get_or_create_location_area(self.hass, self.location)
-        return DeviceInfo(
+        info = DeviceInfo(
             identifiers={(DOMAIN, self._entity.unique_id)},
             name=self._device_card_name,
             manufacturer=self._entity.device.manufacturer,
@@ -208,8 +209,23 @@ class TagoEntityHA:
             configuration_url=self._entity.dashboard_uri,
             suggested_area=self._entity.location,
             serial_number=self._entity.tag,
-            via_device=(DOMAIN, self._entity.device.unique_id)
         )
+        if (parent_id := self._parent_device_id) is not None:
+            info["via_device_id"] = parent_id
+        return info
+
+    @property
+    def _parent_device_id(self) -> str | None:
+        """Registry id of the parent TagoDevice card. `via_device_id` needs
+        the registry id, so this resolves the parent's identifier to it."""
+        hass = getattr(self, "hass", None)
+        config_entry = getattr(getattr(self, "platform", None), "config_entry", None)
+        if hass is None or config_entry is None:
+            return None
+        parent = dr.async_get(hass).async_get_device_by_identifier(
+            (DOMAIN, self._entity.device.unique_id), config_entry.entry_id
+        )
+        return parent.id if parent is not None else None
 
     @property
     def extra_state_attributes(self) -> dict | None:

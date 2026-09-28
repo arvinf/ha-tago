@@ -5,6 +5,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .entity import TagoEntityHA
+from .const import fault_labels
 from .TagoNet import TagoDevice, TagoGateway, TagoSensor, TagoVirtualSensor
 from . import generate_device_info
 
@@ -42,6 +43,9 @@ async def async_setup_entry(
             items.append(TagoVirtualSensorHA(e))
         elif isinstance(e, TagoSensor):
             items.append(TagoSensorHA(e))
+        # PROTOCOL.md §11.3: every load reports `oc_fault`/`ot_fault`.
+        if e.is_load and not e.is_unused():
+            items.append(LoadFaultSensor(e))
     async_add_entities(items)
 
 
@@ -157,3 +161,38 @@ class TagoSensorHA(TagoEntityHA, BinarySensorEntity):
     @property
     def is_on(self) -> bool:
         return self._entity.is_on
+
+
+class LoadFaultSensor(TagoEntityHA, BinarySensorEntity):
+    """Single per-load fault indicator (PROTOCOL.md §11.3).
+
+    The firmware reports overcurrent and overtemperature separately, but
+    the user only needs to know the channel has faulted — the specific
+    reason is surfaced as an attribute. Diagnostic category but enabled
+    by default; a tripped load is something the user needs to see. The
+    matching Repair issue is raised independently (see
+    `__init__._async_register_load_fault_issues`) so the user is
+    notified even if the entity is disabled."""
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def unique_id(self) -> str:
+        return f"{self._entity.unique_id}:fault"
+
+    @property
+    def name(self) -> str:
+        # `has_entity_name=True`: return only the suffix so HA composes
+        # `<device card name> <suffix>` without doubling the parent label.
+        return "Fault"
+
+    @property
+    def is_on(self) -> bool:
+        return self._entity.has_fault
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        attrs = dict(super().extra_state_attributes or {})
+        attrs["fault_reasons"] = fault_labels(self._entity.fault)
+        return attrs

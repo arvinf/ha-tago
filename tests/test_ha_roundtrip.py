@@ -671,10 +671,12 @@ async def test_state_changed_fault_surfaces_on_entity(fake_server):
 
         await fake_server.broadcast_event(
             {"evt": "state_changed", "src": L0, "id": L0,
-             "type": "light_dimmable", "brightness": 0, "fault": "overcurrent"}
+             "type": "light_dimmable", "brightness": 0,
+             "fault": ["oc"]}
         )
         await _wait_for(lambda: entity.has_fault, timeout=1.0)
-        assert "overcurrent" in entity.fault
+        assert entity.fault == ["oc"]
+        assert entity.oc_fault is True
     finally:
         await device.disconnect(timeout=5.0)
 

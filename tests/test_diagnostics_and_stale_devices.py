@@ -195,13 +195,17 @@ async def test_stale_device_registry_entry_pruned_when_load_now_unused(
         manufacturer="TAGO",
         name="Old Load",
     )
-    assert registry.async_get_device(identifiers={(DOMAIN, L0)}) is not None
+    assert registry.async_get_device_by_identifier(
+        (DOMAIN, L0), entry.entry_id
+    ) is not None
 
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
     # Stale entry should be gone — L0 is UNUSED now.
-    assert registry.async_get_device(identifiers={(DOMAIN, L0)}) is None
+    assert registry.async_get_device_by_identifier(
+        (DOMAIN, L0), entry.entry_id
+    ) is None
 
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
@@ -230,7 +234,9 @@ async def test_stale_device_registry_keeps_currently_configured_loads(
     # Setup creates a device_registry entry for L0 via the entity's
     # DeviceInfo. Verify it stayed.
     registry = dr.async_get(hass)
-    assert registry.async_get_device(identifiers={(DOMAIN, L0)}) is not None
+    assert registry.async_get_device_by_identifier(
+        (DOMAIN, L0), entry.entry_id
+    ) is not None
 
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
@@ -271,8 +277,8 @@ async def test_stale_device_registry_does_not_touch_other_entries(
     await hass.async_block_till_done()
 
     # Other entry's device is still there.
-    assert registry.async_get_device(
-        identifiers={("other_integration", "external-device-1")}
+    assert registry.async_get_device_by_identifier(
+        ("other_integration", "external-device-1"), other_entry.entry_id
     ) is not None
 
     await hass.config_entries.async_unload(entry.entry_id)
@@ -314,7 +320,9 @@ async def test_reload_removes_entity_when_load_no_longer_reported_by_firmware(
     ent_registry = er.async_get(hass)
 
     # Sanity — L0 is in both registries after initial setup.
-    initial_device = dev_registry.async_get_device(identifiers={(DOMAIN, L0)})
+    initial_device = dev_registry.async_get_device_by_identifier(
+        (DOMAIN, L0), entry.entry_id
+    )
     assert initial_device is not None, (
         "expected device_registry row for L0 after initial setup"
     )
@@ -333,7 +341,9 @@ async def test_reload_removes_entity_when_load_no_longer_reported_by_firmware(
     await hass.async_block_till_done()
 
     # After reload: device_registry row for L0 is gone (pruned)…
-    assert dev_registry.async_get_device(identifiers={(DOMAIN, L0)}) is None, (
+    assert dev_registry.async_get_device_by_identifier(
+        (DOMAIN, L0), entry.entry_id
+    ) is None, (
         "device_registry row for L0 should be pruned after reload"
     )
     # …and so are the entity_registry rows that pointed at it (cascade).
@@ -450,8 +460,8 @@ async def test_stale_device_registry_preserves_gateway(
 
     # Gateway is still in the registry — it was preserved even though
     # no real loads are configured.
-    assert registry.async_get_device(
-        identifiers={(DOMAIN, "TAGO_TEST_001")}
+    assert registry.async_get_device_by_identifier(
+        (DOMAIN, "TAGO_TEST_001"), entry.entry_id
     ) is not None
 
     await hass.config_entries.async_unload(entry.entry_id)

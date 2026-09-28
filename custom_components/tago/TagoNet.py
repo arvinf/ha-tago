@@ -165,6 +165,18 @@ class TagoEntity(TagoBase):
     # only for entities on a wireless link.
     PROP_RSI = "rsi"
 
+    # PROTOCOL.md §11.3: load state always carries these two booleans.
+    # PROTOCOL.md §11.3: load state carries `fault` as an array of
+    # active codes. Unrecognized codes are kept so future fault types
+    # still surface to the user.
+    PROP_FAULT = "fault"
+    FAULT_OVERCURRENT = "oc"
+    FAULT_OVERTEMP = "ot"
+
+    # True for entity classes the firmware treats as loads (PROTOCOL.md
+    # §11) — the only ones that report fault state.
+    is_load = False
+
     types = []
 
     def __init__(self, json: dict, device: TagoDevice):
@@ -228,11 +240,23 @@ class TagoEntity(TagoBase):
 
     @property
     def fault(self) -> list[str]:
+        """Active fault codes as reported by the firmware (PROTOCOL.md
+        §11.3). Unrecognized codes are passed through."""
         return self._fault
 
     @property
     def has_fault(self) -> bool:
         return len(self._fault) > 0
+
+    @property
+    def oc_fault(self) -> bool:
+        """PROTOCOL.md §11.3 — firmware-owned overcurrent state."""
+        return self.FAULT_OVERCURRENT in self._fault
+
+    @property
+    def ot_fault(self) -> bool:
+        """PROTOCOL.md §11.3 — firmware-owned overtemperature state."""
+        return self.FAULT_OVERTEMP in self._fault
 
     @property
     def rsi(self) -> int | None:
@@ -298,7 +322,17 @@ class TagoEntity(TagoBase):
         rsi = data.get(TagoEntity.PROP_RSI)
         if isinstance(rsi, (int, float)) and not isinstance(rsi, bool):
             self._rsi = int(rsi)
+        self._handle_fault_state(data)
         self.update()
+
+    def _handle_fault_state(self, data: dict) -> None:
+        """PROTOCOL.md §11.3 — `fault` is an array of active codes and
+        every message carries a complete snapshot, so the previous set is
+        replaced wholesale (including by an empty array)."""
+        codes = data.get(self.PROP_FAULT)
+        if not isinstance(codes, list):
+            return
+        self._fault = [c for c in codes if isinstance(c, str)]
 
     async def _handle_message(self, msg: TagoMessage) -> bool:
         if msg.is_event():
@@ -1226,6 +1260,7 @@ class TagoDevice(TagoBase):
 class TagoSwitch(TagoEntity):
     OUTLET_ONOFF = "outlet_onoff"
 
+    is_load = True
     types = [OUTLET_ONOFF]
 
     REQ_TURN_ON = "turn_on"
@@ -1319,7 +1354,6 @@ class TagoLight(TagoEntity):
     PROP_ELAPSED = "elapsed"
     PROP_START = "start"
     PROP_END = "end"
-    PROP_FAULT = "fault"
     PROP_EFFECT = "effect"
     VALUE_FLASH = "flash"
     REQ_SET_LIGHT = "set_light"
@@ -1328,6 +1362,8 @@ class TagoLight(TagoEntity):
 
     types = [LIGHT_ONOFF, LIGHT_DIMMABLE, LIGHT_MONO, LIGHT_RGB,
              LIGHT_RGBW, LIGHT_RGB_CCT, LIGHT_CCT]
+
+    is_load = True
 
     REQ_TURN_ON = "turn_on"
     REQ_TURN_OFF = "turn_off"
@@ -1519,10 +1555,6 @@ class TagoLight(TagoEntity):
         self._colour_x = data.get(self.PROP_X, self._colour_x)
         self._colour_y = data.get(self.PROP_Y, self._colour_y)
 
-        if self.PROP_FAULT in data:
-            fault = data[self.PROP_FAULT]
-            self._fault = fault.split(',') if fault else list()
-
         # If a ramp is in progress on the device, animate the value
         # change locally so HA renders smoothly instead of snapping to
         # the end-state.
@@ -1563,6 +1595,8 @@ class TagoCover(TagoEntity):
 
     types = [COVER_SHADE, COVER_CURTAIN, COVER_BLIND]
 
+    is_load = True
+
     REQ_STOP = "stop_move"
     REQ_MOVE_TO = "move_to"
 
@@ -1597,6 +1631,7 @@ class TagoFan(TagoEntity):
     # not a protocol command — the firmware has no dispatcher for it).
     FAN_ONOFF = "fan_onoff"
 
+    is_load = True
     types = [FAN_ONOFF]
 
     REQ_TURN_ON = "turn_on"

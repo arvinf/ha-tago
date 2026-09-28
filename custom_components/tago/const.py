@@ -30,3 +30,17 @@ ATTR_RATE = "rate"
 # repair notification for every install on older firmware — change with
 # care.
 MIN_FIRMWARE_VERSION = "1.0.0"
+
+
+# PROTOCOL.md §11.3: wire fault codes mapped to user-facing wording.
+# Codes missing from this table are surfaced verbatim so future fault
+# types still reach the user.
+FAULT_CODE_LABELS = {
+    "oc": "overcurrent",
+    "ot": "overtemperature",
+}
+
+
+def fault_labels(codes) -> list[str]:
+    """Human-readable labels for a load's active fault codes."""
+    return [FAULT_CODE_LABELS.get(code, code) for code in codes]

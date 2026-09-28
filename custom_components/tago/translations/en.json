@@ -77,6 +77,10 @@
     "firmware_too_old": {
       "title": "Tago device firmware out of date",
       "description": "Tago device `{serial}` is running firmware {current}. The integration requires firmware {minimum} or newer for full functionality. Please update the device firmware via its web UI, then reload the integration to clear this notice."
+    },
+    "load_fault": {
+      "title": "Tago load fault",
+      "description": "The load `{name}` on Tago device `{serial}` has faulted ({reasons}) and the firmware has shut the output down. Check the wiring and the connected fixture, and make sure the device has adequate airflow. This notice clears automatically once the device reports the fault has cleared."
     }
   },
   "entity": {

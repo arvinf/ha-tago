@@ -25,6 +25,7 @@ import pytest
 import pytest_asyncio
 from homeassistant.const import STATE_ON, STATE_OFF
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from syrupy.assertion import SnapshotAssertion
@@ -1340,3 +1341,247 @@ async def test_entity_callbacks_deregistered_on_unload(
 
     # Callback should be deregistered.
     assert len(entity._update_cbs) == 0
+
+
+# =====================================================================
+# Per-load fault indicator + Repair issue — PROTOCOL.md §11.3
+# =====================================================================
+
+def _fault_issue_id(entry, unique_id: str) -> str:
+    return f"load_fault_{entry.entry_id}_{unique_id}"
+
+
+async def _broadcast_fault(fake_server, codes: list[str]) -> None:
+    await fake_server.broadcast_event({
+        "evt": "state_changed", "src": L0, "id": L0,
+        "type": "light_dimmable", "brightness": 500,
+        "fault": codes,
+    })
+
+
+@pytest.mark.asyncio
+async def test_load_fault_sensor_starts_off_and_has_problem_device_class(
+    hass, fake_server, setup_factory
+):
+    """Every load gets one fault indicator, off while the firmware
+    reports an empty fault array."""
+    await setup_factory({
+        L0: {"type": "light_dimmable", "brightness": 500, "name": "Dimmer",
+             "tag": "1A", "fault": []},
+    })
+    entity_id = _resolve_entity_id(hass, "binary_sensor", f"{L0}:fault")
+    state = hass.states.get(entity_id)
+    assert state.state == STATE_OFF
+    assert state.attributes["device_class"] == "problem"
+    assert state.attributes["fault_reasons"] == []
+
+
+@pytest.mark.asyncio
+async def test_overcurrent_turns_on_fault_sensor_and_raises_issue(
+    hass, fake_server, setup_factory
+):
+    """An `"oc"` code flips the indicator on and raises a
+    Repair issue the user can see."""
+    entry = await setup_factory({
+        L0: {"type": "light_dimmable", "brightness": 500, "name": "Dimmer",
+             "tag": "1A", "fault": []},
+    })
+    entity_id = _resolve_entity_id(hass, "binary_sensor", f"{L0}:fault")
+    issue_registry = ir.async_get(hass)
+    assert issue_registry.async_get_issue(DOMAIN, _fault_issue_id(entry, L0)) is None
+
+    await _broadcast_fault(fake_server, ["oc"])
+    await _wait_until(lambda: hass.states.get(entity_id).state == STATE_ON)
+
+    state = hass.states.get(entity_id)
+    assert state.state == STATE_ON
+    assert state.attributes["fault_reasons"] == ["overcurrent"]
+
+    issue = issue_registry.async_get_issue(DOMAIN, _fault_issue_id(entry, L0))
+    assert issue is not None
+    assert issue.severity == ir.IssueSeverity.ERROR
+    assert issue.translation_key == "load_fault"
+    assert issue.translation_placeholders["name"] == "Dimmer"
+    assert issue.translation_placeholders["reasons"] == "overcurrent"
+
+
+@pytest.mark.asyncio
+async def test_overtemp_uses_the_same_single_fault_indicator(
+    hass, fake_server, setup_factory
+):
+    """Overtemperature raises the same indicator and issue as
+    overcurrent — the user isn't asked to reason about the two
+    firmware codes separately."""
+    entry = await setup_factory({
+        L0: {"type": "light_dimmable", "brightness": 500, "name": "Dimmer",
+             "tag": "1A", "fault": []},
+    })
+    entity_id = _resolve_entity_id(hass, "binary_sensor", f"{L0}:fault")
+
+    await _broadcast_fault(fake_server, ["ot"])
+    await _wait_until(lambda: hass.states.get(entity_id).state == STATE_ON)
+
+    assert hass.states.get(entity_id).attributes["fault_reasons"] == [
+        "overtemperature"
+    ]
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _fault_issue_id(entry, L0))
+    assert issue is not None
+    assert issue.translation_placeholders["reasons"] == "overtemperature"
+
+    # No separate per-code entities exist.
+    registry = er.async_get(hass)
+    assert registry.async_get_entity_id("binary_sensor", DOMAIN, f"{L0}:oc_fault") is None
+    assert registry.async_get_entity_id("binary_sensor", DOMAIN, f"{L0}:ot_fault") is None
+
+
+@pytest.mark.asyncio
+async def test_both_codes_active_reports_both_reasons(
+    hass, fake_server, setup_factory
+):
+    entry = await setup_factory({
+        L0: {"type": "light_dimmable", "brightness": 500, "name": "Dimmer",
+             "tag": "1A", "fault": []},
+    })
+    entity_id = _resolve_entity_id(hass, "binary_sensor", f"{L0}:fault")
+
+    await _broadcast_fault(fake_server, ["oc", "ot"])
+    await _wait_until(lambda: hass.states.get(entity_id).state == STATE_ON)
+
+    assert hass.states.get(entity_id).attributes["fault_reasons"] == [
+        "overcurrent", "overtemperature",
+    ]
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, _fault_issue_id(entry, L0))
+    assert issue.translation_placeholders["reasons"] == (
+        "overcurrent, overtemperature"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unknown_fault_code_still_reports_a_fault(
+    hass, fake_server, setup_factory
+):
+    """An unrecognized code from future firmware must still raise the
+    indicator and issue, surfaced verbatim."""
+    entry = await setup_factory({
+        L0: {"type": "light_dimmable", "brightness": 500, "name": "Dimmer",
+             "tag": "1A", "fault": []},
+    })
+    entity_id = _resolve_entity_id(hass, "binary_sensor", f"{L0}:fault")
+
+    await _broadcast_fault(fake_server, ["zz"])
+    await _wait_until(lambda: hass.states.get(entity_id).state == STATE_ON)
+
+    assert hass.states.get(entity_id).attributes["fault_reasons"] == ["zz"]
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, _fault_issue_id(entry, L0)
+    ) is not None
+
+
+@pytest.mark.asyncio
+async def test_fault_clearing_turns_sensor_off_and_deletes_issue(
+    hass, fake_server, setup_factory
+):
+    """An empty fault array clears both the indicator and the Repair
+    issue — the user shouldn't have to dismiss a stale notice."""
+    entry = await setup_factory({
+        L0: {"type": "light_dimmable", "brightness": 500, "name": "Dimmer",
+             "tag": "1A", "fault": []},
+    })
+    entity_id = _resolve_entity_id(hass, "binary_sensor", f"{L0}:fault")
+    issue_registry = ir.async_get(hass)
+
+    await _broadcast_fault(fake_server, ["oc", "ot"])
+    await _wait_until(lambda: hass.states.get(entity_id).state == STATE_ON)
+    assert issue_registry.async_get_issue(DOMAIN, _fault_issue_id(entry, L0)) is not None
+
+    await _broadcast_fault(fake_server, [])
+    await _wait_until(lambda: hass.states.get(entity_id).state == STATE_OFF)
+
+    state = hass.states.get(entity_id)
+    assert state.state == STATE_OFF
+    assert state.attributes["fault_reasons"] == []
+    assert issue_registry.async_get_issue(DOMAIN, _fault_issue_id(entry, L0)) is None
+
+
+@pytest.mark.asyncio
+async def test_partial_clear_keeps_remaining_fault(
+    hass, fake_server, setup_factory
+):
+    """The array is a snapshot: dropping one code clears only that one."""
+    entry = await setup_factory({
+        L0: {"type": "light_dimmable", "brightness": 500, "name": "Dimmer",
+             "tag": "1A", "fault": ["oc", "ot"]},
+    })
+    entity_id = _resolve_entity_id(hass, "binary_sensor", f"{L0}:fault")
+    assert hass.states.get(entity_id).state == STATE_ON
+
+    await _broadcast_fault(fake_server, ["ot"])
+    await _wait_until(
+        lambda: hass.states.get(entity_id).attributes["fault_reasons"] == [
+            "overtemperature"
+        ]
+    )
+
+    assert hass.states.get(entity_id).state == STATE_ON
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, _fault_issue_id(entry, L0)
+    ) is not None
+
+
+@pytest.mark.asyncio
+async def test_fault_active_at_setup_raises_issue_immediately(
+    hass, fake_server, setup_factory
+):
+    """A load already faulted when HA connects surfaces the issue on
+    setup, without waiting for a state_changed event."""
+    entry = await setup_factory({
+        L0: {"type": "light_dimmable", "brightness": 0, "name": "Dimmer",
+             "tag": "1A", "fault": ["oc"]},
+    })
+    entity_id = _resolve_entity_id(hass, "binary_sensor", f"{L0}:fault")
+    assert hass.states.get(entity_id).state == STATE_ON
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, _fault_issue_id(entry, L0)
+    ) is not None
+
+
+@pytest.mark.asyncio
+async def test_fault_issue_cleared_on_unload(
+    hass, enable_custom_integrations, fake_server
+):
+    """Unloading the entry clears its fault issues so a removed entry
+    doesn't leave orphaned Repairs behind."""
+    fake_server.seed({
+        L0: {"type": "light_dimmable", "brightness": 0, "name": "Dimmer",
+             "tag": "1A", "fault": ["oc"]},
+    })
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOSTSTR: f"127.0.0.1:{fake_server.port}", CONF_PIN: ""},
+        unique_id="TAGO_TEST_001",
+        version=9,
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    issue_registry = ir.async_get(hass)
+    assert issue_registry.async_get_issue(DOMAIN, _fault_issue_id(entry, L0)) is not None
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert issue_registry.async_get_issue(DOMAIN, _fault_issue_id(entry, L0)) is None
+
+
+@pytest.mark.asyncio
+async def test_non_load_entities_have_no_fault_indicator(
+    hass, fake_server, setup_factory
+):
+    """Scenes aren't loads — they never report fault flags, so they
+    don't get an indicator."""
+    await setup_factory({
+        L0: {"type": "scene", "name": "Evening", "tag": "1A"},
+    })
+    registry = er.async_get(hass)
+    assert registry.async_get_entity_id("binary_sensor", DOMAIN, f"{L0}:fault") is None

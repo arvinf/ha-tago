@@ -1,0 +1,268 @@
+# serializer version: 1
+# name: test_light_rgbw_white_mode_when_xy_zero
+  dict({
+    'attributes': dict({
+      <LightEntityStateAttribute.BRIGHTNESS: 'brightness'>: 204,
+      <LightEntityStateAttribute.COLOR_MODE: 'color_mode'>: <ColorMode.WHITE: 'white'>,
+      <EntityStateAttribute.FRIENDLY_NAME: 'friendly_name'>: 'RGBW Light',
+      <LightEntityStateAttribute.HS_COLOR: 'hs_color'>: None,
+      <LightEntityStateAttribute.RGB_COLOR: 'rgb_color'>: None,
+      <LightEntityCapabilityAttribute.SUPPORTED_COLOR_MODES: 'supported_color_modes'>: list([
+        <ColorMode.WHITE: 'white'>,
+        <ColorMode.XY: 'xy'>,
+      ]),
+      <EntityStateAttribute.SUPPORTED_FEATURES: 'supported_features'>: <LightEntityFeature: 40>,
+      'tag': '1A',
+      <LightEntityStateAttribute.XY_COLOR: 'xy_color'>: None,
+    }),
+    'entity_id': 'light.rgbw_light',
+    'state': 'on',
+  })
+# ---
+# name: test_light_rgbw_xy_mode_when_xy_set
+  dict({
+    'attributes': dict({
+      <LightEntityStateAttribute.BRIGHTNESS: 'brightness'>: 204,
+      <LightEntityStateAttribute.COLOR_MODE: 'color_mode'>: <ColorMode.XY: 'xy'>,
+      <EntityStateAttribute.FRIENDLY_NAME: 'friendly_name'>: 'RGBW Light',
+      <LightEntityStateAttribute.HS_COLOR: 'hs_color'>: tuple(
+        32.484,
+        61.569,
+      ),
+      <LightEntityStateAttribute.RGB_COLOR: 'rgb_color'>: tuple(
+        255,
+        183,
+        98,
+      ),
+      <LightEntityCapabilityAttribute.SUPPORTED_COLOR_MODES: 'supported_color_modes'>: list([
+        <ColorMode.WHITE: 'white'>,
+        <ColorMode.XY: 'xy'>,
+      ]),
+      <EntityStateAttribute.SUPPORTED_FEATURES: 'supported_features'>: <LightEntityFeature: 40>,
+      'tag': '1A',
+      <LightEntityStateAttribute.XY_COLOR: 'xy_color'>: tuple(
+        0.5,
+        0.4,
+      ),
+    }),
+    'entity_id': 'light.rgbw_light',
+    'state': 'on',
+  })
+# ---
+# name: test_light_rgbww_color_temp_mode_when_xy_zero
+  dict({
+    'attributes': dict({
+      <LightEntityStateAttribute.BRIGHTNESS: 'brightness'>: 204,
+      <LightEntityStateAttribute.COLOR_MODE: 'color_mode'>: <ColorMode.COLOR_TEMP: 'color_temp'>,
+      <LightEntityStateAttribute.COLOR_TEMP_KELVIN: 'color_temp_kelvin'>: 4600,
+      <EntityStateAttribute.FRIENDLY_NAME: 'friendly_name'>: 'RGBWW Light',
+      <LightEntityStateAttribute.HS_COLOR: 'hs_color'>: tuple(
+        26.749,
+        24.966,
+      ),
+      <LightEntityCapabilityAttribute.MAX_COLOR_TEMP_KELVIN: 'max_color_temp_kelvin'>: 6500,
+      <LightEntityCapabilityAttribute.MIN_COLOR_TEMP_KELVIN: 'min_color_temp_kelvin'>: 2700,
+      <LightEntityStateAttribute.RGB_COLOR: 'rgb_color'>: tuple(
+        255,
+        220,
+        191,
+      ),
+      <LightEntityCapabilityAttribute.SUPPORTED_COLOR_MODES: 'supported_color_modes'>: list([
+        <ColorMode.COLOR_TEMP: 'color_temp'>,
+        <ColorMode.XY: 'xy'>,
+      ]),
+      <EntityStateAttribute.SUPPORTED_FEATURES: 'supported_features'>: <LightEntityFeature: 40>,
+      'tag': '1A',
+      <LightEntityStateAttribute.XY_COLOR: 'xy_color'>: tuple(
+        0.388,
+        0.356,
+      ),
+    }),
+    'entity_id': 'light.rgbww_light',
+    'state': 'on',
+  })
+# ---
+# name: test_light_subtype_state_shape[light_mono]
+  dict({
+    'attributes': dict({
+      <LightEntityStateAttribute.BRIGHTNESS: 'brightness'>: None,
+      <LightEntityStateAttribute.COLOR_MODE: 'color_mode'>: None,
+      <EntityStateAttribute.FRIENDLY_NAME: 'friendly_name'>: 'Test light_mono',
+      <LightEntityCapabilityAttribute.SUPPORTED_COLOR_MODES: 'supported_color_modes'>: list([
+        <ColorMode.BRIGHTNESS: 'brightness'>,
+      ]),
+      <EntityStateAttribute.SUPPORTED_FEATURES: 'supported_features'>: <LightEntityFeature: 40>,
+      'tag': '1A',
+    }),
+    'entity_id': 'light.test_light_mono',
+    'state': 'off',
+  })
+# ---
+# name: test_light_subtype_state_shape[light_rgb]
+  dict({
+    'attributes': dict({
+      <LightEntityStateAttribute.BRIGHTNESS: 'brightness'>: None,
+      <LightEntityStateAttribute.COLOR_MODE: 'color_mode'>: None,
+      <EntityStateAttribute.FRIENDLY_NAME: 'friendly_name'>: 'Test light_rgb',
+      <LightEntityStateAttribute.HS_COLOR: 'hs_color'>: None,
+      <LightEntityStateAttribute.RGB_COLOR: 'rgb_color'>: None,
+      <LightEntityCapabilityAttribute.SUPPORTED_COLOR_MODES: 'supported_color_modes'>: list([
+        <ColorMode.XY: 'xy'>,
+      ]),
+      <EntityStateAttribute.SUPPORTED_FEATURES: 'supported_features'>: <LightEntityFeature: 40>,
+      'tag': '1A',
+      <LightEntityStateAttribute.XY_COLOR: 'xy_color'>: None,
+    }),
+    'entity_id': 'light.test_light_rgb',
+    'state': 'off',
+  })
+# ---
+# name: test_light_subtype_state_shape[light_rgbw]
+  dict({
+    'attributes': dict({
+      <LightEntityStateAttribute.BRIGHTNESS: 'brightness'>: None,
+      <LightEntityStateAttribute.COLOR_MODE: 'color_mode'>: None,
+      <EntityStateAttribute.FRIENDLY_NAME: 'friendly_name'>: 'Test light_rgbw',
+      <LightEntityStateAttribute.HS_COLOR: 'hs_color'>: None,
+      <LightEntityStateAttribute.RGB_COLOR: 'rgb_color'>: None,
+      <LightEntityCapabilityAttribute.SUPPORTED_COLOR_MODES: 'supported_color_modes'>: list([
+        <ColorMode.WHITE: 'white'>,
+        <ColorMode.XY: 'xy'>,
+      ]),
+      <EntityStateAttribute.SUPPORTED_FEATURES: 'supported_features'>: <LightEntityFeature: 40>,
+      'tag': '1A',
+      <LightEntityStateAttribute.XY_COLOR: 'xy_color'>: None,
+    }),
+    'entity_id': 'light.test_light_rgbw',
+    'state': 'off',
+  })
+# ---
+# name: test_light_subtype_state_shape[light_rgbww]
+  dict({
+    'attributes': dict({
+      <LightEntityStateAttribute.BRIGHTNESS: 'brightness'>: None,
+      <LightEntityStateAttribute.COLOR_MODE: 'color_mode'>: None,
+      <LightEntityStateAttribute.COLOR_TEMP_KELVIN: 'color_temp_kelvin'>: None,
+      <EntityStateAttribute.FRIENDLY_NAME: 'friendly_name'>: 'Test light_rgbww',
+      <LightEntityStateAttribute.HS_COLOR: 'hs_color'>: None,
+      <LightEntityCapabilityAttribute.MAX_COLOR_TEMP_KELVIN: 'max_color_temp_kelvin'>: 6500,
+      <LightEntityCapabilityAttribute.MIN_COLOR_TEMP_KELVIN: 'min_color_temp_kelvin'>: 2700,
+      <LightEntityStateAttribute.RGB_COLOR: 'rgb_color'>: None,
+      <LightEntityCapabilityAttribute.SUPPORTED_COLOR_MODES: 'supported_color_modes'>: list([
+        <ColorMode.COLOR_TEMP: 'color_temp'>,
+        <ColorMode.XY: 'xy'>,
+      ]),
+      <EntityStateAttribute.SUPPORTED_FEATURES: 'supported_features'>: <LightEntityFeature: 40>,
+      'tag': '1A',
+      <LightEntityStateAttribute.XY_COLOR: 'xy_color'>: None,
+    }),
+    'entity_id': 'light.test_light_rgbww',
+    'state': 'off',
+  })
+# ---
+# name: test_light_subtype_state_shape[light_ww]
+  dict({
+    'attributes': dict({
+      <LightEntityStateAttribute.BRIGHTNESS: 'brightness'>: None,
+      <LightEntityStateAttribute.COLOR_MODE: 'color_mode'>: None,
+      <LightEntityStateAttribute.COLOR_TEMP_KELVIN: 'color_temp_kelvin'>: None,
+      <EntityStateAttribute.FRIENDLY_NAME: 'friendly_name'>: 'Test light_ww',
+      <LightEntityStateAttribute.HS_COLOR: 'hs_color'>: None,
+      <LightEntityCapabilityAttribute.MAX_COLOR_TEMP_KELVIN: 'max_color_temp_kelvin'>: 6500,
+      <LightEntityCapabilityAttribute.MIN_COLOR_TEMP_KELVIN: 'min_color_temp_kelvin'>: 2700,
+      <LightEntityStateAttribute.RGB_COLOR: 'rgb_color'>: None,
+      <LightEntityCapabilityAttribute.SUPPORTED_COLOR_MODES: 'supported_color_modes'>: list([
+        <ColorMode.COLOR_TEMP: 'color_temp'>,
+      ]),
+      <EntityStateAttribute.SUPPORTED_FEATURES: 'supported_features'>: <LightEntityFeature: 40>,
+      'tag': '1A',
+      <LightEntityStateAttribute.XY_COLOR: 'xy_color'>: None,
+    }),
+    'entity_id': 'light.test_light_ww',
+    'state': 'off',
+  })
+# ---
+# name: test_state_changed_brightness_appears_in_hass_state
+  dict({
+    'attributes': dict({
+      <LightEntityStateAttribute.BRIGHTNESS: 'brightness'>: 191,
+      <LightEntityStateAttribute.COLOR_MODE: 'color_mode'>: <ColorMode.BRIGHTNESS: 'brightness'>,
+      <EntityStateAttribute.FRIENDLY_NAME: 'friendly_name'>: 'Test Dimmer',
+      <LightEntityCapabilityAttribute.SUPPORTED_COLOR_MODES: 'supported_color_modes'>: list([
+        <ColorMode.BRIGHTNESS: 'brightness'>,
+      ]),
+      <EntityStateAttribute.SUPPORTED_FEATURES: 'supported_features'>: <LightEntityFeature: 40>,
+      'tag': '1A',
+    }),
+    'entity_id': 'light.test_dimmer',
+    'state': 'on',
+  })
+# ---
+# name: test_state_changed_ct_appears_as_color_temp_kelvin
+  dict({
+    'attributes': dict({
+      <LightEntityStateAttribute.BRIGHTNESS: 'brightness'>: 204,
+      <LightEntityStateAttribute.COLOR_MODE: 'color_mode'>: <ColorMode.COLOR_TEMP: 'color_temp'>,
+      <LightEntityStateAttribute.COLOR_TEMP_KELVIN: 'color_temp_kelvin'>: 4600,
+      <EntityStateAttribute.FRIENDLY_NAME: 'friendly_name'>: 'Test CCT',
+      <LightEntityStateAttribute.HS_COLOR: 'hs_color'>: tuple(
+        26.749,
+        24.966,
+      ),
+      <LightEntityCapabilityAttribute.MAX_COLOR_TEMP_KELVIN: 'max_color_temp_kelvin'>: 6500,
+      <LightEntityCapabilityAttribute.MIN_COLOR_TEMP_KELVIN: 'min_color_temp_kelvin'>: 2700,
+      <LightEntityStateAttribute.RGB_COLOR: 'rgb_color'>: tuple(
+        255,
+        220,
+        191,
+      ),
+      <LightEntityCapabilityAttribute.SUPPORTED_COLOR_MODES: 'supported_color_modes'>: list([
+        <ColorMode.COLOR_TEMP: 'color_temp'>,
+      ]),
+      <EntityStateAttribute.SUPPORTED_FEATURES: 'supported_features'>: <LightEntityFeature: 40>,
+      'tag': '1A',
+      <LightEntityStateAttribute.XY_COLOR: 'xy_color'>: tuple(
+        0.388,
+        0.356,
+      ),
+    }),
+    'entity_id': 'light.test_cct',
+    'state': 'on',
+  })
+# ---
+# name: test_state_changed_is_on_appears_for_fan
+  dict({
+    'attributes': dict({
+      <EntityStateAttribute.FRIENDLY_NAME: 'friendly_name'>: 'Fan',
+      <EntityStateAttribute.SUPPORTED_FEATURES: 'supported_features'>: <FanEntityFeature: 48>,
+      'tag': '1A',
+    }),
+    'entity_id': 'fan.fan',
+    'state': 'on',
+  })
+# ---
+# name: test_state_changed_is_on_appears_for_switch
+  dict({
+    'attributes': dict({
+      <EntityStateAttribute.DEVICE_CLASS: 'device_class'>: 'outlet',
+      <EntityStateAttribute.FRIENDLY_NAME: 'friendly_name'>: 'Pump',
+      'tag': '1A',
+    }),
+    'entity_id': 'switch.pump',
+    'state': 'on',
+  })
+# ---
+# name: test_state_changed_position_updates_cover_state
+  dict({
+    'attributes': dict({
+      <CoverEntityStateAttribute.CURRENT_POSITION: 'current_position'>: 40,
+      <EntityStateAttribute.DEVICE_CLASS: 'device_class'>: 'blind',
+      <EntityStateAttribute.FRIENDLY_NAME: 'friendly_name'>: 'Blind',
+      <CoverEntityStateAttribute.IS_CLOSED: 'is_closed'>: False,
+      <EntityStateAttribute.SUPPORTED_FEATURES: 'supported_features'>: <CoverEntityFeature: 15>,
+      'tag': '1A',
+    }),
+    'entity_id': 'cover.blind',
+    'state': 'open',
+  })
+# ---

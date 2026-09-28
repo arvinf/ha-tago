@@ -219,7 +219,9 @@ async def test_keypad_registered_as_device(setup_with_seed, hass):
         },
     })
     registry = dr.async_get(hass)
-    keypad_device = registry.async_get_device(identifiers={(DOMAIN, L0)})
+    keypad_device = registry.async_get_device_by_identifier(
+        (DOMAIN, L0), entry.entry_id
+    )
     assert keypad_device is not None
     # The keypad sub-card now inherits the parent TagoDevice's
     # `model_num` (keypads no longer carry their own model_num) —
@@ -227,6 +229,10 @@ async def test_keypad_registered_as_device(setup_with_seed, hass):
     assert keypad_device.model == "dimac8"
     assert keypad_device.manufacturer == "TAGO"
     assert keypad_device.suggested_area == "Bedroom"
+    main_card = registry.async_get_device_by_identifier(
+        (DOMAIN, "TAGO_TEST_001"), entry.entry_id
+    )
+    assert keypad_device.via_device_id == main_card.id
 
 
 @pytest.mark.asyncio
@@ -1295,9 +1301,11 @@ async def test_keypad_led_device_info_nests_under_keypad(
     """Each key's HA light entity must point at the KEYPAD's
     device-registry entry — keys never get their own card. HA users
     see one card per keypad regardless of key count."""
-    await _seed_kp_led(setup_with_seed)
+    entry = await _seed_kp_led(setup_with_seed)
     registry = dr.async_get(hass)
-    keypad_dev = registry.async_get_device(identifiers={(DOMAIN, L0)})
+    keypad_dev = registry.async_get_device_by_identifier(
+        (DOMAIN, L0), entry.entry_id
+    )
     assert keypad_dev is not None
 
     led_entity_id = _resolve_entity_id(hass, "light", f"{L0}:1")
@@ -1452,10 +1460,10 @@ async def test_device_locked_keypad_skips_subcard_and_chains_to_main_device(
 ):
     """A keypad whose wire `id` starts with `_` (PROTOCOL_PROPOSALS
     D8) is a single-purpose product. The host must NOT mint a
-    per-keypad sub-card; per-key light entities `via_device` straight
+    per-keypad sub-card; per-key light entities attach straight
     to the TagoDevice's main card."""
     DEVICE_ID = "TAGO_TEST_001"
-    await setup_with_seed({
+    entry = await setup_with_seed({
         LOCKED_KP: {
             "type": "keypad_4btn", "tag": "K1",
             "name": "Bedroom Keypad", "location": "Bedroom",
@@ -1469,10 +1477,14 @@ async def test_device_locked_keypad_skips_subcard_and_chains_to_main_device(
 
     # The keypad's own id must NOT have a device-registry row (no
     # sub-card minted for device-locked entities).
-    assert dev_registry.async_get_device(identifiers={(DOMAIN, LOCKED_KP)}) is None
+    assert dev_registry.async_get_device_by_identifier(
+        (DOMAIN, LOCKED_KP), entry.entry_id
+    ) is None
 
     # The parent TagoDevice card still exists.
-    main_card = dev_registry.async_get_device(identifiers={(DOMAIN, DEVICE_ID)})
+    main_card = dev_registry.async_get_device_by_identifier(
+        (DOMAIN, DEVICE_ID), entry.entry_id
+    )
     assert main_card is not None
 
     # Per D8 the main card adopts the device-locked entity's name and
@@ -1496,7 +1508,7 @@ async def test_device_locked_load_attaches_to_main_card(setup_with_seed, hass):
     too — the policy isn't keypad-specific. No sub-card; HA entity
     attaches to the parent TagoDevice card."""
     DEVICE_ID = "TAGO_TEST_001"
-    await setup_with_seed({
+    entry = await setup_with_seed({
         LOCKED_LIGHT: {
             "type": "light_dimmable", "tag": "L1",
             "name": "Curtain Motor", "location": "Living Room",
@@ -1508,10 +1520,14 @@ async def test_device_locked_load_attaches_to_main_card(setup_with_seed, hass):
     ent_registry = er.async_get(hass)
 
     # No sub-card for the entity's own id.
-    assert dev_registry.async_get_device(identifiers={(DOMAIN, LOCKED_LIGHT)}) is None
+    assert dev_registry.async_get_device_by_identifier(
+        (DOMAIN, LOCKED_LIGHT), entry.entry_id
+    ) is None
 
     # Main card adopts entity name/location.
-    main_card = dev_registry.async_get_device(identifiers={(DOMAIN, DEVICE_ID)})
+    main_card = dev_registry.async_get_device_by_identifier(
+        (DOMAIN, DEVICE_ID), entry.entry_id
+    )
     assert main_card is not None
     assert main_card.name == "Curtain Motor"
     assert main_card.suggested_area == "Living Room"
@@ -1947,23 +1963,24 @@ def test_generate_device_info_multichannel_uses_device_name():
 # device_info on TagoEntityHA — multichannel vs device-locked
 # =====================================================================
 
-def test_device_info_multichannel_mints_subcard():
-    """A multichannel entity gets its own sub-card with via_device."""
-    from custom_components.tago.entity import TagoEntityHA
-    from custom_components.tago.TagoNet import TagoLight
-    from custom_components.tago.const import DOMAIN
-    device = _make_device()
-    light = TagoLight(
-        {"id": "MC_LT", "type": "light_dimmable",
-         "name": "Kitchen", "location": "Kitchen", "tag": "1A",
-         "brightness": 0},
-        device,
+@pytest.mark.asyncio
+async def test_device_info_multichannel_mints_subcard(setup_with_seed, hass):
+    """A multichannel entity gets its own sub-card linked to the parent
+    device card via `via_device_id`."""
+    entry = await setup_with_seed({
+        L0: {"type": "light_dimmable", "name": "Kitchen",
+             "location": "Kitchen", "tag": "1A", "brightness": 0},
+    })
+    registry = dr.async_get(hass)
+    subcard = registry.async_get_device_by_identifier(
+        (DOMAIN, L0), entry.entry_id
     )
-    wrapper = TagoEntityHA(light)
-    info = wrapper.device_info
-    assert (DOMAIN, "MC_LT") in info["identifiers"]
-    assert info["via_device"] == (DOMAIN, device.unique_id)
-    assert info["serial_number"] == "1A"
+    assert subcard is not None
+    assert subcard.serial_number == "1A"
+    main_card = registry.async_get_device_by_identifier(
+        (DOMAIN, "TAGO_TEST_001"), entry.entry_id
+    )
+    assert subcard.via_device_id == main_card.id
 
 
 def test_device_info_device_locked_attaches_to_parent():
@@ -1981,7 +1998,7 @@ def test_device_info_device_locked_attaches_to_parent():
     wrapper = TagoEntityHA(light)
     info = wrapper.device_info
     assert (DOMAIN, device.unique_id) in info["identifiers"]
-    assert "via_device" not in info
+    assert "via_device_id" not in info
     assert "serial_number" not in info
 
 
@@ -2178,53 +2195,89 @@ async def test_scene_activation_fires_bus_event(
 
 def test_light_fault_persists_when_state_event_has_no_fault_field():
     """A state_changed event that only updates brightness should NOT
-    clear a pre-existing fault. Previously the else branch of the
-    fault-parsing code cleared _fault unconditionally."""
+    clear a pre-existing fault."""
     from custom_components.tago.TagoNet import TagoLight
     device = _make_device()
     light = TagoLight(
         {"id": "L0", "type": "light_dimmable", "name": "x",
          "location": "y", "tag": "1A", "brightness": 500,
-         "fault": "overcurrent,thermal"},
+         "fault": ["oc", "ot"]},
         device,
     )
-    assert light.fault == ["overcurrent", "thermal"]
+    assert light.fault == ["oc", "ot"]
     assert light.has_fault is True
 
     light.handle_state_change({"brightness": 700})
-    assert light.fault == ["overcurrent", "thermal"]
+    assert light.fault == ["oc", "ot"]
     assert light.has_fault is True
 
 
-def test_light_fault_clears_when_empty_fault_field_arrives():
-    """An explicit empty `fault` field should clear the fault list."""
+def test_light_fault_clears_when_empty_array_arrives():
+    """An empty `fault` array is a complete snapshot — it clears."""
     from custom_components.tago.TagoNet import TagoLight
     device = _make_device()
     light = TagoLight(
         {"id": "L0", "type": "light_dimmable", "name": "x",
          "location": "y", "tag": "1A", "brightness": 500,
-         "fault": "overcurrent"},
+         "fault": ["oc"]},
         device,
     )
     assert light.has_fault is True
 
-    light.handle_state_change({"fault": ""})
+    light.handle_state_change({"fault": []})
     assert light.fault == []
     assert light.has_fault is False
+    assert light.oc_fault is False
 
 
-def test_light_fault_updates_when_new_fault_arrives():
-    """A state event with a different fault value should replace."""
+def test_light_fault_array_replaces_previous_snapshot():
+    """The array is a full snapshot, not a delta — codes absent from
+    the new array are cleared."""
     from custom_components.tago.TagoNet import TagoLight
     device = _make_device()
     light = TagoLight(
         {"id": "L0", "type": "light_dimmable", "name": "x",
          "location": "y", "tag": "1A", "brightness": 500,
-         "fault": "overcurrent"},
+         "fault": ["oc"]},
         device,
     )
-    light.handle_state_change({"fault": "thermal"})
-    assert light.fault == ["thermal"]
+    light.handle_state_change({"fault": ["ot"]})
+    assert light.fault == ["ot"]
+    assert light.oc_fault is False
+    assert light.ot_fault is True
+
+
+def test_light_fault_codes_are_independent():
+    """OC and OT are membership tests, not positional."""
+    from custom_components.tago.TagoNet import TagoLight
+    device = _make_device()
+    light = TagoLight(
+        {"id": "L0", "type": "light_dimmable", "tag": "1A",
+         "brightness": 500, "fault": ["ot"]},
+        device,
+    )
+    assert light.oc_fault is False
+    assert light.ot_fault is True
+
+    light.handle_state_change({"fault": ["oc", "ot"]})
+    assert light.oc_fault is True
+    assert light.ot_fault is True
+
+
+def test_light_unknown_fault_code_is_tolerated():
+    """Future fault codes must not break parsing — they're kept and
+    still count as a fault."""
+    from custom_components.tago.TagoNet import TagoLight
+    device = _make_device()
+    light = TagoLight(
+        {"id": "L0", "type": "light_dimmable", "tag": "1A",
+         "brightness": 500, "fault": ["oc", "zz"]},
+        device,
+    )
+    assert light.fault == ["oc", "zz"]
+    assert light.has_fault is True
+    assert light.oc_fault is True
+    assert light.ot_fault is False
 
 
 # =====================================================================

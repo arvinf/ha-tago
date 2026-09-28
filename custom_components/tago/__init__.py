@@ -19,6 +19,7 @@ from .const import (
     CONF_PIN,
     DOMAIN,
     MIN_FIRMWARE_VERSION,
+    fault_labels,
 )
 from .TagoNet import TagoDevice, TagoEntity, TagoGateway, TagoKeypad, TagoScene
 
@@ -37,6 +38,10 @@ EVENT_TAGO_KEY = "tago_key_event"
 # (which fire only on `scene.turn_on` from HA) so automations can react
 # to scenes that were triggered by the device itself.
 EVENT_TAGO_SCENE = "tago_scene_activated"
+
+# hass.data[DOMAIN][entry_id] key holding the (load, listener) pairs wired
+# for Repair-issue syncing, so unload can detach them.
+DATA_FAULT_LISTENERS = "fault_listeners"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -132,7 +137,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     entry.runtime_data = gateway
     _async_prune_stale_devices(hass, entry, gateway)
+    _async_register_device_cards(hass, entry, gateway)
     _async_register_keypads_and_dispatch_events(hass, entry, gateway)
+    _async_register_load_fault_issues(hass, entry, gateway)
     _async_register_scene_event_dispatch(hass, gateway)
 
     for device in gateway.devices:
@@ -156,6 +163,18 @@ def _parse_version(v: str | None) -> tuple[int, ...] | None:
         return None
 
 
+def _async_register_device_cards(
+    hass: HomeAssistant, entry: ConfigEntry, gateway: TagoGateway
+) -> None:
+    """Register each TagoDevice's card up front so sub-cards created later
+    can reference it by registry id via `via_device_id`."""
+    registry = dr.async_get(hass)
+    for device in gateway.devices:
+        registry.async_get_or_create(
+            config_entry_id=entry.entry_id, **generate_device_info(device)
+        )
+
+
 def _async_register_keypads_and_dispatch_events(
     hass: HomeAssistant, entry: ConfigEntry, gateway: TagoGateway
 ) -> None:
@@ -166,9 +185,12 @@ def _async_register_keypads_and_dispatch_events(
 
     Device-locked keypads (id prefixed with `_`) skip the sub-card:
     the parent TagoDevice's card already represents the whole product
-    and per-key light entities `via_device` directly to it."""
+    and per-key light entities link directly to it."""
     registry = dr.async_get(hass)
     for device in gateway.devices:
+        parent = registry.async_get_device_by_identifier(
+            (DOMAIN, device.unique_id), entry.entry_id
+        )
         for kpd in device.entities:
             if not isinstance(kpd, TagoKeypad):
                 continue
@@ -176,6 +198,7 @@ def _async_register_keypads_and_dispatch_events(
                 # Keypads no longer carry their own model_num — the
                 # parent TagoDevice's `model_num` is the canonical
                 # product identifier on the card.
+                extra = {} if parent is None else {"via_device_id": parent.id}
                 registry.async_get_or_create(
                     config_entry_id=entry.entry_id,
                     identifiers={(DOMAIN, kpd.unique_id)},
@@ -184,7 +207,7 @@ def _async_register_keypads_and_dispatch_events(
                     name=kpd.name or f"Keypad {kpd.tag}",
                     suggested_area=kpd.location,
                     serial_number=kpd.tag,
-                    via_device=(DOMAIN, device.unique_id),
+                    **extra,
                 )
             kpd.set_on_key_event(_make_key_event_dispatcher(hass, kpd))
 
@@ -232,6 +255,63 @@ def _make_scene_event_dispatcher(hass: HomeAssistant, scn: TagoScene):
             "ts": data.get("ts"),
         })
     return _dispatch
+
+
+def _async_register_load_fault_issues(
+    hass: HomeAssistant, entry: ConfigEntry, gateway: TagoGateway
+) -> None:
+    """Mirror each load's firmware-owned fault state (PROTOCOL.md §11.3)
+    into HA's Issue Registry, so a faulted channel surfaces in
+    Settings → Repairs and clears itself when the firmware de-asserts
+    the fault."""
+    listeners = hass.data[DOMAIN][entry.entry_id].setdefault(
+        DATA_FAULT_LISTENERS, []
+    )
+    for device in gateway.devices:
+        for load in device.entities:
+            if not load.is_load or load.is_unused():
+                continue
+            listener = _make_load_fault_issue_sync(hass, entry, load)
+            load.set_on_state_changed(listener)
+            listeners.append((load, listener))
+            _async_sync_load_fault_issue(hass, entry, load)
+
+
+def _make_load_fault_issue_sync(
+    hass: HomeAssistant, entry: ConfigEntry, load: TagoEntity
+):
+    def _sync() -> None:
+        _async_sync_load_fault_issue(hass, entry, load)
+    return _sync
+
+
+def _load_fault_issue_id(entry: ConfigEntry, load: TagoEntity) -> str:
+    return f"load_fault_{entry.entry_id}_{load.unique_id}"
+
+
+def _async_sync_load_fault_issue(
+    hass: HomeAssistant, entry: ConfigEntry, load: TagoEntity
+) -> None:
+    """Create or delete the load's Repair issue to match its current
+    fault state. Idempotent — safe to call on every `state_changed`."""
+    issue_id = _load_fault_issue_id(entry, load)
+    if not load.has_fault:
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
+        return
+
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        issue_id,
+        is_fixable=False,
+        severity=ir.IssueSeverity.ERROR,
+        translation_key="load_fault",
+        translation_placeholders={
+            "name": load.name or load.tag or load.unique_id,
+            "serial": load.device.serial_num or load.device.unique_id,
+            "reasons": ", ".join(fault_labels(load.fault)),
+        },
+    )
 
 
 def _async_check_firmware_repair(
@@ -318,7 +398,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id, None)
+        entry_data = hass.data[DOMAIN].pop(entry.entry_id, None) or {}
         # Repair issues are tied to the active entry — clear all we raised.
         if gateway is not None:
             for device in gateway.devices:
@@ -326,6 +406,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     hass, DOMAIN,
                     f"firmware_too_old_{entry.entry_id}_{device.unique_id}",
                 )
+        for load, listener in entry_data.get(DATA_FAULT_LISTENERS, []):
+            load.remove_on_state_changed(listener)
+            ir.async_delete_issue(
+                hass, DOMAIN, _load_fault_issue_id(entry, load)
+            )
         _LOGGER.debug("Unloaded entry for %s", entry.entry_id)
 
     return unload_ok

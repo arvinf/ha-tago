@@ -731,13 +731,17 @@ async def test_unused_load_with_existing_device_registry_entry_is_removed(
         manufacturer="TAGO",
         name="Old Slot",
     )
-    assert registry.async_get_device(identifiers={(DOMAIN, L0)}) is not None
+    assert registry.async_get_device_by_identifier(
+        (DOMAIN, L0), entry.entry_id
+    ) is not None
 
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
     # Cleanup loop should have removed the pre-existing gateway.
-    assert registry.async_get_device(identifiers={(DOMAIN, L0)}) is None
+    assert registry.async_get_device_by_identifier(
+        (DOMAIN, L0), entry.entry_id
+    ) is None
 
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
